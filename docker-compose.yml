@@ -1,0 +1,51 @@
+﻿# Dev workflow:
+#   server → npm run dev  (http://localhost:4000)
+#   web    → npm run dev  (http://localhost:5173)
+#   bots   → spawned dynamically by the server via dockerode
+#
+# Build the bot image:
+#   docker compose build bot
+#
+# For a full production deploy, uncomment the server/web services below.
+
+services:
+  # ── PostgreSQL (optionnel en dev si PG natif déjà présent) ────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: vibot-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: vibot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vibot}
+      POSTGRES_DB: vibot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vibot -d vibot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - vibot-net
+
+  # ── Bot image (buildée ici, conteneurs lancés dynamiquement par le server) ─
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    image: vibot-bot:latest
+    # Pas de démarrage automatique — le server spawne les conteneurs via dockerode.
+    profiles:
+      - build-only
+    networks:
+      - vibot-net
+
+volumes:
+  postgres_data:
+
+networks:
+  vibot-net:
+    driver: bridge
+    name: vibot-net

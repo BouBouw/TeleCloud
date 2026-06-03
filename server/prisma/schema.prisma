@@ -1,0 +1,240 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users ──────────────────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String
+  globalRole   String   @default("USER")  // ADMIN | MOD | USER
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedWorkspaces   Workspace[]       @relation("WorkspaceOwner")
+  memberships       WorkspaceMember[]
+  refreshTokens     RefreshToken[]
+}
+
+// ─── Refresh Tokens ──────────────────────────────────────────────────────────
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// ─── Workspaces (Channel Spaces) ─────────────────────────────────────────────
+model Workspace {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  ownerId     String
+  owner       User     @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members         WorkspaceMember[]
+  tracks          Track[]
+  videoFiles      VideoFile[]
+  bots            Bot[]
+  montageProjects MontageProject[]
+  socialAccounts  SocialAccount[]
+  socialPosts     SocialPost[]
+}
+
+// ─── Workspace Members ───────────────────────────────────────────────────────
+model WorkspaceMember {
+  id          String        @id @default(uuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        String        @default("EDITOR")  // OWNER | MANAGER | EDITOR
+  joinedAt    DateTime      @default(now())
+
+  @@unique([workspaceId, userId])
+}
+
+// ─── VideoFiles (MP4 from social platforms) ──────────────────────────────────
+model VideoFile {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  title        String
+  artist       String?
+  platform     String    // tiktok | instagram | twitter | snapchat
+  sourceUrl    String    // original URL
+  filePath     String    // relative to storage root
+  thumbnailUrl String?
+  duration     Int?      // seconds
+  fileSize     Int?      // bytes
+  socialId     String?   // platform:id dedup key
+  createdAt    DateTime  @default(now())
+}
+
+// ─── Tracks ──────────────────────────────────────────────────────────────────
+model Track {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  title        String
+  artist       String?
+  featuring    String?
+  album        String?
+  duration     Int?      // seconds
+  fileSize     Int?      // bytes
+  format       String    @default("mp3")
+  filePath     String    // relative to storage root
+  artworkUrl   String?
+  soundcloudId String?
+  soundcloudUrl String?
+  playCount    Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  telegramMessages TelegramMessage[]
+}
+
+// ─── Bots ────────────────────────────────────────────────────────────────────
+model Bot {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name          String
+  telegramToken String
+  channelId     String
+  containerId   String?   // Docker container ID
+  status        String    @default("stopped") // running | stopped | error | paused
+  broadcastCount Int      @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  telegramMessages TelegramMessage[]
+}
+
+// ─── Telegram sent messages (for deletion sync) ───────────────────────────────
+model TelegramMessage {
+  id        String   @id @default(uuid())
+  trackId   String
+  track     Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  botId     String
+  bot       Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  messageId Int      // Telegram message_id returned by sendAudio
+  createdAt DateTime @default(now())
+}
+
+// ─── Montage Projects ────────────────────────────────────────────────────────
+model MontageProject {
+  id            String   @id @default(uuid())
+  workspaceId   String
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  title         String
+  style         String   @default("DARK_TRAP")    // DARK_TRAP | CLEAN_MINIMAL | HYPER_POP | FAST_CUTS | SLOW_MOTION | CINEMATIC | AMBIENT | LYRIC_VIDEO | EQ_VISUALIZER
+  durationMode  String   @default("AUTO")         // AUTO | SECONDS_15 | SECONDS_30 | SECONDS_60 | FULL_SONG
+  ratio         String   @default("LANDSCAPE")    // LANDSCAPE | PORTRAIT | SQUARE
+  audioPath          String?  // relative to storage root
+  audioDuration      Float?
+  outputPath         String?  // relative to storage root (LANDSCAPE)
+  outputPortraitPath String?  // relative to storage root (PORTRAIT)
+  outputSquarePath   String?  // relative to storage root (SQUARE)
+  beatData           String?  // JSON: { bpm, beats, drops, sections, duration }
+  subtitleData       String?  // JSON: [{ start, end, text }]
+  status             String   @default("DRAFT")   // DRAFT | QUEUED | PROCESSING | COMPLETED | FAILED
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  sourceVideos  MontageSourceVideo[]
+  renderJob     MontageRenderJob?
+  socialPosts   SocialPost[]
+  clips         MontageClip[]
+}
+
+model MontageClip {
+  id             String         @id @default(uuid())
+  projectId      String
+  project        MontageProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceVideoId  String
+  position       Int
+  clipStart      Float
+  clipEnd        Float
+  outputStart    Float
+  outputDuration Float
+  effects        String         @default("[]")  // JSON VideoEffect[]
+  transition     String         @default("cut") // cut | fade | dip_to_black
+  scoreMotion    Float          @default(0)
+  scoreBrightness Float         @default(0)
+  scoreSharpness Float          @default(0)
+  scoreOverall   Float          @default(0)
+  createdAt      DateTime       @default(now())
+}
+
+model MontageSourceVideo {
+  id         String         @id @default(uuid())
+  projectId  String
+  project    MontageProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type       String         // URL | UPLOAD
+  source     String         // URL or original filename
+  localPath  String?        // relative to storage root
+  duration   Float?
+  createdAt  DateTime       @default(now())
+}
+
+model MontageRenderJob {
+  id          String         @id @default(uuid())
+  projectId   String         @unique
+  project     MontageProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status      String         @default("QUEUED")  // QUEUED | RUNNING | DONE | FAILED
+  progress    Int            @default(0)
+  currentStep String         @default("")
+  logs        String         @default("")
+  error       String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime       @default(now())
+}
+
+// ─── Social Accounts ─────────────────────────────────────────────────────────
+model SocialAccount {
+  id           String     @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform     String     // TIKTOK | INSTAGRAM | YOUTUBE | TWITTER | FACEBOOK | SNAPCHAT | LINKEDIN | PINTEREST
+  accountName  String     // @username or display name
+  accountLabel String?    // user-defined label (e.g. "Compte principal")
+  accountId    String?    // platform user id
+  accessToken  String     // access token or session cookie
+  refreshToken String?    // refresh token or csrftoken cookie
+  expiresAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  posts        SocialPost[]
+}
+
+// ─── Social Posts ─────────────────────────────────────────────────────────────
+model SocialPost {
+  id           String         @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projectId    String
+  project      MontageProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  accountId    String
+  account      SocialAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  platform     String         // TIKTOK | INSTAGRAM | YOUTUBE | TWITTER | FACEBOOK | SNAPCHAT | LINKEDIN | PINTEREST
+  caption      String?
+  hashtags     String?
+  scheduledAt  DateTime?      // null = post immediately
+  status       String         @default("PENDING") // PENDING | PUBLISHING | DONE | FAILED | CANCELLED
+  error        String?
+  publishedUrl String?
+  publishedAt  DateTime?
+  createdAt    DateTime       @default(now())
+}

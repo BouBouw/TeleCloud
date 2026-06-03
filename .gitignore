@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build outputs
+server/dist/
+web/dist/
+
+# Environment files
+.env
+*.env.local
+*.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tar.gz
+*.zip
+
+# PM2
+.pm2/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Prisma
+server/prisma/migrations/**/migration.sql
