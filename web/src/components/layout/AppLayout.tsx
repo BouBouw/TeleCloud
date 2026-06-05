@@ -39,7 +39,7 @@ export default function AppLayout() {
     }).catch(() => setWsChecked(true))
   }, [user])
 
-  if (loading || !wsChecked) return (
+  if (loading || (user != null && !wsChecked)) return (
     <div className="flex h-screen items-center justify-center" style={{ background: '#111' }}>
       <div className="w-7 h-7 rounded-full animate-spin" style={{ border: '2px solid #2a2a2a', borderTopColor: '#f0a830' }} />
     </div>
