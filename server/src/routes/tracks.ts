@@ -10,7 +10,8 @@ import { v4 as uuid } from 'uuid'
 import prisma from '../lib/prisma'
 import { authenticate } from '../middleware/auth'
 import { ensureWorkspaceDir, resolveSCMetadata, downloadSCTrackById, searchSoundCloud } from '../services/soundcloud'
-import { getYtdlpMeta, downloadAudioYtdlp, downloadVideoYtdlp, downloadSnapchatStories, detectPlatform } from '../services/ytdlp'
+import { getYtdlpMeta, getYouTubeOembedMeta, downloadAudioYtdlp, downloadVideoYtdlp, downloadSnapchatStories, detectPlatform } from '../services/ytdlp'
+import { downloadAudioViaCobalt, downloadVideoViaCobalt } from '../services/cobalt'
 import logger from '../lib/logger'
 
 const router = Router({ mergeParams: true })
@@ -206,8 +207,10 @@ router.post<WsParams>('/scrape-social', async (req, res) => {
   }
 
   try {
-    const meta = await getYtdlpMeta(url)
     const platform = detectPlatform(url)!
+    // For YouTube: oEmbed for metadata (no auth), cobalt for download (no auth)
+    let meta = platform === 'youtube' ? await getYouTubeOembedMeta(url) : null
+    if (!meta) meta = await getYtdlpMeta(url)
     const socialId = `${platform}:${meta.id}`
 
     if (outputFormat === 'MP4') {
@@ -224,8 +227,19 @@ router.post<WsParams>('/scrape-social', async (req, res) => {
       try {
         const destDir = path.join(STORAGE_ROOT, 'videos', req.params.wsId)
         if (platform === 'snapchat') {
-          // Direct scraper: extracts all story mediaUrls from the profile page
           producedFiles = await downloadSnapchatStories(url, destDir)
+        } else if (platform === 'youtube') {
+          // Cobalt tunnels YouTube through its own servers — no auth needed
+          const destFile = path.join(destDir, `${uuid()}.mp4`)
+          fs.mkdirSync(destDir, { recursive: true })
+          await downloadVideoViaCobalt(url, destFile)
+            .catch(async (e) => {
+              logger.warn('[YouTube] cobalt failed, falling back to yt-dlp', { err: String(e) })
+              const files = await downloadVideoYtdlp(url, destDir)
+              producedFiles = files
+              return
+            })
+          if (!producedFiles.length && fs.existsSync(destFile)) producedFiles = [destFile]
         } else {
           producedFiles = await downloadVideoYtdlp(url, destDir)
         }
@@ -271,9 +285,21 @@ router.post<WsParams>('/scrape-social', async (req, res) => {
       try {
         const destDir = ensureWorkspaceDir(req.params.wsId)
         const filename = uuid()
-        const produced = await downloadAudioYtdlp(url, path.join(destDir, `${filename}.mp3`))
-        filePath = path.relative(STORAGE_ROOT, produced)
-        fileSize = fs.statSync(produced).size
+        const destFile = path.join(destDir, `${filename}.mp3`)
+        if (platform === 'youtube') {
+          // Cobalt tunnels YouTube through its own servers — no auth needed
+          await downloadAudioViaCobalt(url, destFile)
+            .catch(async (e) => {
+              logger.warn('[YouTube] cobalt audio failed, falling back to yt-dlp', { err: String(e) })
+              await downloadAudioYtdlp(url, destFile)
+            })
+        } else {
+          await downloadAudioYtdlp(url, destFile)
+        }
+        if (fs.existsSync(destFile)) {
+          filePath = path.relative(STORAGE_ROOT, destFile)
+          fileSize = fs.statSync(destFile).size
+        }
       } catch (e) {
         logger.warn('Social audio download failed, saving metadata only', { err: String(e) })
       }
@@ -417,7 +443,11 @@ router.get<WsParams>('/resolve-social', async (req, res) => {
   }
 
   try {
-    const meta = await getYtdlpMeta(url)
+    const platform = detectPlatform(url)!
+    // For YouTube: use public oEmbed API first (no auth, instant)
+    // Fall back to yt-dlp if oEmbed fails (e.g. private/age-restricted)
+    let meta = platform === 'youtube' ? await getYouTubeOembedMeta(url) : null
+    if (!meta) meta = await getYtdlpMeta(url)
     res.json({
       result: {
         id: meta.id,
@@ -426,7 +456,7 @@ router.get<WsParams>('/resolve-social', async (req, res) => {
         artworkUrl: meta.thumbnail,
         duration: meta.duration ? Math.floor(meta.duration) : undefined,
         permalink_url: meta.webpage_url,
-        platform: detectPlatform(url),
+        platform,
       },
     })
   } catch (err) {

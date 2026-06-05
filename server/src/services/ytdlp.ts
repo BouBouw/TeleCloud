@@ -31,6 +31,39 @@ export interface YtdlpMeta {
   extractor: string
 }
 
+/** Extract YouTube video ID from any YouTube URL format */
+function ytVideoId(url: string): string | null {
+  const m = url.match(/(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/)
+  return m ? m[1] : null
+}
+
+/**
+ * Fetch YouTube metadata via the public oEmbed endpoint — no auth, no cookies.
+ * Returns null on failure so caller can fall back to yt-dlp.
+ */
+export async function getYouTubeOembedMeta(url: string): Promise<YtdlpMeta | null> {
+  const videoId = ytVideoId(url)
+  if (!videoId) return null
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
+    const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(10_000) })
+    if (!res.ok) return null
+    const data = await res.json() as { title: string; author_name: string; thumbnail_url: string }
+    return {
+      id: videoId,
+      title: data.title,
+      uploader: data.author_name,
+      uploader_id: data.author_name,
+      // Upgrade to maxresdefault for better quality thumbnail
+      thumbnail: data.thumbnail_url.replace('hqdefault', 'maxresdefault'),
+      webpage_url: `https://www.youtube.com/watch?v=${videoId}`,
+      extractor: 'youtube',
+    }
+  } catch {
+    return null
+  }
+}
+
 /** Fetch metadata without downloading */
 export function getYtdlpMeta(url: string): Promise<YtdlpMeta> {
   return new Promise((resolve, reject) => {
