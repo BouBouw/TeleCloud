@@ -206,7 +206,9 @@ async function assembleWithXfade(
     const xOffset = Math.max(0.01, outputStart - fadeDur)
     const nextLabel = i < N - 1 ? `[xf${i}]` : '[vbase]'
     fParts.push(
-      `${prevLabel}[nv${i}]xfade=transition=dissolve:duration=${fadeDur.toFixed(3)}` +
+      // `fade` = smooth linear cross-dissolve. (Do NOT use `dissolve`: that xfade mode
+      // is a per-pixel RANDOM-threshold transition → the "grainy/pixelated" look.)
+      `${prevLabel}[nv${i}]xfade=transition=fade:duration=${fadeDur.toFixed(3)}` +
       `:offset=${xOffset.toFixed(4)}${nextLabel}`,
     )
     prevLabel = nextLabel
