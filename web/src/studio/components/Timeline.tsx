@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import type React from 'react'
 import { Loader2, Volume1, VolumeX, X, Plus } from 'lucide-react'
 import { useI18n } from '../../i18n'
@@ -44,7 +44,7 @@ export function Timeline({ api, tool, onContextMenu, onAddTrack }: {
     }
   }, [tracks, px])
 
-  useEffect(() => { redraw() }, [redraw])
+  useLayoutEffect(() => { redraw() }, [redraw])
   useEffect(() => {
     const scroll = scrollRef.current; if (!scroll) return
     let raf = 0
@@ -53,6 +53,19 @@ export function Timeline({ api, tool, onContextMenu, onAddTrack }: {
     const ro = new ResizeObserver(redraw); ro.observe(scroll)
     return () => { scroll.removeEventListener('scroll', onScroll); ro.disconnect(); cancelAnimationFrame(raf) }
   }, [redraw])
+
+  /* ── auto fit-to-view: on first load, zoom so the whole track fits ── */
+  const fittedRef = useRef(false)
+  useEffect(() => {
+    const scroll = scrollRef.current
+    if (total <= 0) { fittedRef.current = false; return }
+    if (fittedRef.current || !scroll) return
+    const vw = scroll.clientWidth
+    if (vw < 60) return
+    const target = (vw - 24) / (total * BASE_PX_PER_SEC)
+    api.setZoom(Math.max(0.15, Math.min(6, target)))
+    fittedRef.current = true
+  }, [total, api])
 
   /* ── follow playhead while playing ── */
   useEffect(() => {
@@ -166,7 +179,7 @@ export function Timeline({ api, tool, onContextMenu, onAddTrack }: {
       <div ref={scrollRef} className="flex-1 overflow-x-auto overflow-y-hidden relative" style={{ background: '#141414' }}>
         <div style={{ position: 'relative', width: contentWidth, minHeight: '100%' }}>
           {/* Ruler */}
-          <canvas ref={rulerRef} style={{ display: 'block', height: RULER_HEIGHT, width: '100%', position: 'sticky', left: 0, top: 0, zIndex: 4, cursor: 'pointer', borderBottom: '1px solid #2e2e2e' }}
+          <canvas ref={rulerRef} style={{ display: 'block', height: RULER_HEIGHT, position: 'sticky', left: 0, top: 0, zIndex: 4, cursor: 'pointer', borderBottom: '1px solid #2e2e2e' }}
             onClick={e => api.seek(timeAtClientX(e.clientX))} />
           {/* Rows */}
           {tracks.map(tr => {
@@ -179,7 +192,7 @@ export function Timeline({ api, tool, onContextMenu, onAddTrack }: {
                 onMouseDown={e => { if (e.button === 0 && tr.buffer && eff > 0) startBodyDrag(e, tr) }}>
                 {/* full-width sticky waveform canvas */}
                 <canvas ref={el => { if (el) canvasRefs.current.set(tr.id, el); else canvasRefs.current.delete(tr.id) }}
-                  style={{ display: 'block', position: 'sticky', left: 0, top: RULER_HEIGHT, width: '100%', height: TRACK_HEIGHT - 14, pointerEvents: 'none' }} />
+                  style={{ display: 'block', position: 'sticky', left: 0, top: 0, marginTop: 14, height: TRACK_HEIGHT - 14, pointerEvents: 'none' }} />
                 {tr.buffer && eff > 0 && (
                   <>
                     {/* clip header bar (content coords) */}

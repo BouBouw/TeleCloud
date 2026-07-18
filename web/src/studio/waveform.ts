@@ -16,6 +16,31 @@ export { encodeWAV }
  * @param scrollLeft horizontal scroll of the timeline container (px)
  * @param viewW      visible width (px)
  */
+/**
+ * Per-buffer normalization gain, cached. Scales the waveform so the loudest
+ * peak fills most of the track height — a quiet take still draws a full
+ * waveform instead of a flat line ("adapts to the sound").
+ */
+const peakCache = new WeakMap<AudioBuffer, number>()
+function normGain(buffer: AudioBuffer): number {
+  let peak = peakCache.get(buffer)
+  if (peak === undefined) {
+    peak = 0
+    const d = buffer.getChannelData(0)
+    const stride = Math.max(1, Math.floor(d.length / 120000)) // sample for speed on long files
+    for (let i = 0; i < d.length; i += stride) { const v = d[i] < 0 ? -d[i] : d[i]; if (v > peak) peak = v }
+    peakCache.set(buffer, peak)
+  }
+  return peak > 1e-4 ? 0.94 / peak : 1
+}
+
+/** Mild perceptual lift so quiet passages stay visible while keeping dynamics. */
+const shape = (v: number) => {
+  const s = v < 0 ? -1 : 1
+  const m = Math.min(1, Math.abs(v))
+  return s * Math.pow(m, 0.7)
+}
+
 export function drawWaveViewport(
   canvas: HTMLCanvasElement,
   buffer: AudioBuffer,
@@ -28,23 +53,33 @@ export function drawWaveViewport(
   height: number,
 ) {
   const dpr = window.devicePixelRatio || 1
+  // size the bitmap to the viewport AND pin the CSS box to the same logical
+  // size, so the canvas is never stretched across the (much wider) timeline.
   canvas.width = Math.max(1, Math.round(viewW * dpr))
   canvas.height = Math.max(1, Math.round(height * dpr))
+  canvas.style.width = `${viewW}px`
+  canvas.style.height = `${height}px`
   const ctx = canvas.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, viewW, height)
 
   const data = buffer.getChannelData(0)
-  const srcSR = data.length / buffer.duration
+  const srcSR = buffer.sampleRate
   const segs = buildSegments(buffer.duration, cuts)
   if (segs.length === 0) return
-  const effDur = segs[segs.length - 1].timelineStart + (segs[segs.length - 1].srcEnd - segs[segs.length - 1].srcStart)
+  const last = segs[segs.length - 1]
+  const effDur = last.timelineStart + (last.srcEnd - last.srcStart)
 
-  const mid = Math.floor(height / 2)
-  ctx.fillStyle = color
-  let segIdx = 0
+  const gain = normGain(buffer)
+  const mid = height / 2
   const colStep = 1 / pxPerSec // timeline seconds per screen pixel
 
+  // center line first (waveform drawn on top)
+  ctx.fillStyle = 'rgba(255,255,255,0.05)'
+  ctx.fillRect(0, Math.round(mid), viewW, 1)
+
+  ctx.fillStyle = color
+  let segIdx = 0
   for (let x = 0; x < viewW; x++) {
     const tl = (scrollLeft + x) / pxPerSec - offsetSec
     if (tl < 0 || tl >= effDur) continue
@@ -56,18 +91,17 @@ export function drawWaveViewport(
     const into = tl - seg.timelineStart
     const src0 = seg.srcStart + into
     const src1 = Math.min(seg.srcEnd, seg.srcStart + Math.min(segLen, into + colStep))
-    const s0 = Math.floor(src0 * srcSR)
-    const s1 = Math.max(s0 + 1, Math.floor(src1 * srcSR))
-    let lo = 1, hi = -1
-    for (let j = s0; j < s1 && j < data.length; j++) { const v = data[j]; if (v < lo) lo = v; if (v > hi) hi = v }
-    if (hi < lo) continue
-    const yTop = ((1 - hi) / 2) * height
-    const barH = Math.max(1, ((hi - lo) / 2) * height)
+    const s0 = Math.max(0, Math.floor(src0 * srcSR))
+    const s1 = Math.min(data.length, Math.max(s0 + 1, Math.floor(src1 * srcSR)))
+    let lo = 0, hi = 0
+    for (let j = s0; j < s1; j++) { const v = data[j]; if (v < lo) lo = v; else if (v > hi) hi = v }
+    // normalize + perceptual shape, then map amplitude (−1..1) to the row
+    const top = shape(hi * gain)   // ≥ 0
+    const bot = shape(lo * gain)   // ≤ 0
+    const yTop = mid - top * mid
+    const barH = Math.max(1, (top - bot) * mid)
     ctx.fillRect(x, yTop, 1, barH)
   }
-  // center line
-  ctx.fillStyle = 'rgba(255,255,255,0.06)'
-  ctx.fillRect(0, mid, viewW, 1)
 }
 
 const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
@@ -83,6 +117,8 @@ export function drawRulerViewport(
   const dpr = window.devicePixelRatio || 1
   canvas.width = Math.max(1, Math.round(viewW * dpr))
   canvas.height = Math.max(1, Math.round(height * dpr))
+  canvas.style.width = `${viewW}px`
+  canvas.style.height = `${height}px`
   const ctx = canvas.getContext('2d')!
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, viewW, height)
