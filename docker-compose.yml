@@ -1,4 +1,4 @@
-﻿# Dev workflow:
+# Dev workflow:
 #   server → npm run dev  (http://localhost:4000)
 #   web    → npm run dev  (http://localhost:5173)
 #   bots   → spawned dynamically by the server via dockerode
