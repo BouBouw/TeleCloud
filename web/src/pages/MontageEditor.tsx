@@ -6,7 +6,7 @@ import {
   Trash2, Loader2, Upload, Link2, Settings2, Volume2, VolumeX,
   CheckCircle2, XCircle, Film, Maximize2, Sparkles, Type, Mic,
   Share2, Calendar, GripVertical, Layers, ZoomIn, ZoomOut,
-  Plus, PanelLeft, RefreshCw,
+  Plus, PanelLeft, RefreshCw, Undo2, Redo2, Scissors, Magnet,
 } from 'lucide-react'
 import { montageApi, trackApi, galleryApi, socialApi } from '../lib/api'
 import type { Workspace, MontageProject, MontageStyle, MontageDuration, MontageRatio, MontageClip, BeatData, Track, VideoFile, SocialAccount, SocialPost } from '../lib/api'
@@ -48,6 +48,19 @@ const TRANSITIONS = [
   { id: 'slow_motion', label: 'Ralenti',  desc: 'Effet temporel' },
   { id: 'flash',       label: 'Flash',    desc: 'Éclat blanc' },
 ]
+
+// Per-clip transitions the render pipeline actually supports (backend: cut|fade|dip_to_black)
+const CLIP_TRANSITIONS = [
+  { id: 'cut',          label: 'Coupe', color: '#8899aa' },
+  { id: 'fade',         label: 'Fondu', color: '#4f8ef7' },
+  { id: 'dip_to_black', label: 'Fondu noir', color: '#9b59e2' },
+] as const
+
+/** Recompute cumulative outputStart from each clip's outputDuration (ripple). */
+function recalcStarts(clips: MontageClip[]): MontageClip[] {
+  let cursor = 0
+  return clips.map(c => { const nc = { ...c, outputStart: cursor }; cursor += c.outputDuration; return nc })
+}
 
 const SUBTITLE_EFFECTS = [
   { id: 'NONE',       label: 'Aucun' },
@@ -558,6 +571,7 @@ export default function MontageEditor() {
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
+  const currentTimeRef = useRef(0)
   const [vidDuration, setVidDuration] = useState(0)
   const [vol, setVol] = useState(1)
   const [muted, setMuted] = useState(false)
@@ -633,7 +647,19 @@ export default function MontageEditor() {
   const [generatedClips, setGeneratedClips] = useState<MontageClip[]>([])
   const [beatData, setBeatData] = useState<BeatData | null>(null)
   const [selectedRendClipId, setSelectedRendClipId] = useState<string | null>(null)
-  const [deletingClip, setDeletingClip] = useState<string | null>(null)
+  const [selectedRendIds, setSelectedRendIds] = useState<string[]>([]) // multi-select (bulk ops)
+
+  // ── Timeline editing (trim / split / ripple / transitions) state ──
+  const FPS = 30
+  const [editsDirty, setEditsDirty] = useState(false)     // unsaved clip edits pending a re-render
+  const [applyingEdits, setApplyingEdits] = useState(false)
+  const [snapEnabled, setSnapEnabled] = useState(true)
+  const editHistoryRef = useRef<MontageClip[][]>([])
+  const editFutureRef  = useRef<MontageClip[][]>([])
+  const dbClipIdsRef   = useRef<Set<string>>(new Set()) // ids that exist server-side (to diff deletions)
+  const tmpClipCounter = useRef(0)
+  const [canUndoEdits, setCanUndoEdits] = useState(false)
+  const [canRedoEdits, setCanRedoEdits] = useState(false)
   const [generatingMulti, setGeneratingMulti] = useState(false)
 
   // Deterministic waveform decoration bars
@@ -685,7 +711,7 @@ export default function MontageEditor() {
       if (p.sourceVideos.some(sv => !sv.localPath && !sv.source.startsWith('ERROR:'))) startDlPolling(workspace.id, id)
       // Load generated clips and beat data if project is already completed
       if (p.status === 'COMPLETED') {
-        montageApi.getClips(workspace.id, id).then(({ clips }) => setGeneratedClips(clips)).catch(() => {})
+        montageApi.getClips(workspace.id, id).then(({ clips }) => { setGeneratedClips(recalcStarts(clips)); dbClipIdsRef.current = new Set(clips.map(c => c.id)) }).catch(() => {})
         montageApi.getBeatData(workspace.id, id).then(({ beatData: bd }) => setBeatData(bd)).catch(() => {})
       }
     }).catch(e => setError((e as Error).message)).finally(() => setLoading(false))
@@ -708,7 +734,7 @@ export default function MontageEditor() {
         if (status === 'COMPLETED' || status === 'FAILED') {
           pollRef.current = null; setGenerating(false)
           if (status === 'COMPLETED') {
-            montageApi.getClips(wsId, projId).then(({ clips }) => setGeneratedClips(clips)).catch(() => {})
+            montageApi.getClips(wsId, projId).then(({ clips }) => { setGeneratedClips(recalcStarts(clips)); dbClipIdsRef.current = new Set(clips.map(c => c.id)); editHistoryRef.current = []; editFutureRef.current = []; setEditsDirty(false); setCanUndoEdits(false); setCanRedoEdits(false) }).catch(() => {})
             montageApi.getBeatData(wsId, projId).then(({ beatData: bd }) => setBeatData(bd)).catch(() => {})
           }
           return // stop scheduling
@@ -907,7 +933,7 @@ export default function MontageEditor() {
       if (!tlScrollRef.current) return
       const rect = tlScrollRef.current.getBoundingClientRect()
       const x = e.clientX - rect.left + tlScrollRef.current.scrollLeft
-      const t = Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current))
+      const t = snapValueRef.current(Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current)))
       setCurrentTime(t)
       if (videoRef.current) videoRef.current.currentTime = t
       if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
@@ -1134,16 +1160,186 @@ export default function MontageEditor() {
     finally { setTranscribing(false) }
   }, [workspace, id, transcriptLang, transcriptModel])
 
-  const handleDeleteRendClip = useCallback(async (clipId: string) => {
+  // ── Timeline editing engine (local, applied on "re-render") ──────────
+  const syncEditHist = useCallback(() => {
+    setCanUndoEdits(editHistoryRef.current.length > 0)
+    setCanRedoEdits(editFutureRef.current.length > 0)
+  }, [])
+
+  /** Apply a transform to the clip list, snapshot history, ripple output starts. */
+  const mutateClips = useCallback((fn: (clips: MontageClip[]) => MontageClip[]) => {
+    setGeneratedClips(prev => {
+      editHistoryRef.current.push(prev.map(c => ({ ...c })))
+      if (editHistoryRef.current.length > 80) editHistoryRef.current.shift()
+      editFutureRef.current = []
+      return recalcStarts(fn(prev.map(c => ({ ...c }))))
+    })
+    setEditsDirty(true)
+    syncEditHist()
+  }, [syncEditHist])
+
+  const undoEdits = useCallback(() => {
+    if (editHistoryRef.current.length === 0) return
+    setGeneratedClips(prev => {
+      editFutureRef.current.push(prev.map(c => ({ ...c })))
+      return editHistoryRef.current.pop()!
+    })
+    setEditsDirty(true); syncEditHist()
+  }, [syncEditHist])
+
+  const redoEdits = useCallback(() => {
+    if (editFutureRef.current.length === 0) return
+    setGeneratedClips(prev => {
+      editHistoryRef.current.push(prev.map(c => ({ ...c })))
+      return editFutureRef.current.pop()!
+    })
+    setEditsDirty(true); syncEditHist()
+  }, [syncEditHist])
+
+  /** Local ripple-delete of clips (persisted on re-render). */
+  const rippleDeleteClips = useCallback((ids: string[]) => {
+    if (ids.length === 0) return
+    mutateClips(clips => clips.filter(c => !ids.includes(c.id)))
+    setSelectedRendClipId(prev => prev && ids.includes(prev) ? null : prev)
+    setSelectedRendIds(prev => prev.filter(x => !ids.includes(x)))
+  }, [mutateClips])
+
+  const handleDeleteRendClip = useCallback((clipId: string) => rippleDeleteClips([clipId]), [rippleDeleteClips])
+
+  const setClipTransition = useCallback((clipId: string, transition: string) => {
+    mutateClips(clips => clips.map(c => c.id === clipId ? { ...c, transition } : c))
+  }, [mutateClips])
+
+  /** Split the clip under the playhead into two at the current time. */
+  const splitAtPlayhead = useCallback(() => {
+    const t = currentTimeRef.current
+    setGeneratedClips(prev => {
+      const idx = prev.findIndex(c => t > c.outputStart + 0.1 && t < c.outputStart + c.outputDuration - 0.1)
+      if (idx < 0) return prev
+      editHistoryRef.current.push(prev.map(c => ({ ...c }))); editFutureRef.current = []
+      const c = prev[idx]
+      const firstDur = t - c.outputStart
+      const secondDur = c.outputDuration - firstDur
+      const srcSplit = c.clipStart + firstDur // source second-half start
+      const first  = { ...c, outputDuration: firstDur, clipEnd: srcSplit }
+      const second = { ...c, id: `tmp_${++tmpClipCounter.current}`, clipStart: srcSplit, outputDuration: secondDur, transition: 'cut' }
+      const next = [...prev.slice(0, idx), first, second, ...prev.slice(idx + 1)]
+      return recalcStarts(next)
+    })
+    setEditsDirty(true); syncEditHist()
+  }, [syncEditHist])
+
+  /** Persist all local clip edits to the server, then trigger a re-render from them. */
+  const applyEditsAndRender = useCallback(async () => {
     if (!workspace || !id) return
-    setDeletingClip(clipId)
+    setApplyingEdits(true)
     try {
-      await montageApi.deleteClip(workspace.id, id, clipId)
-      setGeneratedClips(prev => prev.filter(c => c.id !== clipId))
-      setSelectedRendClipId(null)
+      const clips = generatedClips
+      // 1) deletions: db ids no longer present locally
+      const presentIds = new Set(clips.map(c => c.id))
+      const toDelete = [...dbClipIdsRef.current].filter(did => !presentIds.has(did))
+      for (const did of toDelete) { await montageApi.deleteClip(workspace.id, id, did).catch(() => {}) }
+      // 2) creates (tmp_ ids) + 3) updates (existing)
+      const updates: Array<{ id: string; position: number; transition: string; clipStart: number; clipEnd: number; outputDuration: number }> = []
+      const idRemap: Record<string, string> = {}
+      for (let i = 0; i < clips.length; i++) {
+        const c = clips[i]
+        if (c.id.startsWith('tmp_')) {
+          const { clip } = await montageApi.addClip(workspace.id, id, c.sourceVideoId, c.clipStart, c.clipEnd, {
+            position: i, outputStart: c.outputStart, outputDuration: c.outputDuration, transition: c.transition,
+            scoreOverall: c.scoreOverall, scoreMotion: c.scoreMotion, scoreBrightness: c.scoreBrightness, scoreSharpness: c.scoreSharpness, effects: c.effects,
+          })
+          idRemap[c.id] = clip.id
+        } else {
+          updates.push({ id: c.id, position: i, transition: c.transition, clipStart: c.clipStart, clipEnd: c.clipEnd, outputDuration: c.outputDuration })
+        }
+      }
+      if (updates.length) await montageApi.updateClips(workspace.id, id, updates)
+      // reflect new ids locally + refresh the db-id set
+      if (Object.keys(idRemap).length) setGeneratedClips(prev => prev.map(c => idRemap[c.id] ? { ...c, id: idRemap[c.id] } : c))
+      dbClipIdsRef.current = new Set(clips.map(c => idRemap[c.id] ?? c.id))
+      editHistoryRef.current = []; editFutureRef.current = []
+      setCanUndoEdits(false); setCanRedoEdits(false); setEditsDirty(false)
+      // 4) re-render from the edited clips
+      await montageApi.renderEdits(workspace.id, id)
+      setGenerating(true)
+      startPolling(workspace.id, id)
     } catch (e: unknown) { alert((e as Error).message) }
-    finally { setDeletingClip(null) }
-  }, [workspace, id])
+    finally { setApplyingEdits(false) }
+  }, [workspace, id, generatedClips, startPolling])
+
+  /** Snap a timeline time to nearby beats or clip edges (magnetic timeline). */
+  const snapValue = useCallback((t: number): number => {
+    if (!snapEnabled) return t
+    const pps = pxPerSecRef.current || 40
+    const threshold = 8 / pps // 8px magnetic radius, expressed in seconds
+    let best = t, bestDist = threshold
+    const consider = (cand: number) => { const d = Math.abs(cand - t); if (d < bestDist) { bestDist = d; best = cand } }
+    beatData?.beats?.forEach(consider)
+    for (const c of generatedClips) { consider(c.outputStart); consider(c.outputStart + c.outputDuration) }
+    return best
+  }, [snapEnabled, beatData, generatedClips])
+  const snapValueRef = useRef(snapValue); snapValueRef.current = snapValue
+
+  // ── Clip trim drag (one history entry per drag, live preview) ──────────
+  const clipTrimRef = useRef<{ id: string; side: 'start' | 'end'; startX: number; startDur: number; startClipStart: number; startClipEnd: number } | null>(null)
+  const beginEditHistory = useCallback(() => {
+    editHistoryRef.current.push(generatedClips.map(c => ({ ...c })))
+    if (editHistoryRef.current.length > 80) editHistoryRef.current.shift()
+    editFutureRef.current = []
+    syncEditHist()
+  }, [generatedClips, syncEditHist])
+  const liveUpdateClips = useCallback((fn: (clips: MontageClip[]) => MontageClip[]) => {
+    setGeneratedClips(prev => recalcStarts(fn(prev.map(c => ({ ...c })))))
+    setEditsDirty(true)
+  }, [])
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = clipTrimRef.current; if (!d) return
+      const pps = pxPerSecRef.current || 40
+      const delta = (e.clientX - d.startX) / pps
+      liveUpdateClips(clips => clips.map(c => {
+        if (c.id !== d.id) return c
+        if (d.side === 'end') {
+          const dur = Math.max(0.2, d.startDur + delta)
+          return { ...c, outputDuration: dur, clipEnd: d.startClipStart + dur }
+        }
+        const dur = Math.max(0.2, d.startDur - delta)
+        return { ...c, outputDuration: dur, clipStart: Math.max(0, d.startClipEnd - dur) }
+      }))
+    }
+    const onUp = () => { clipTrimRef.current = null }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  }, [liveUpdateClips])
+
+  // ── Editor keyboard shortcuts: undo/redo, split, frame-step ──────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target as HTMLElement)?.isContentEditable) return
+      const ctrl = e.ctrlKey || e.metaKey
+      if (ctrl && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); if (e.shiftKey) redoEdits(); else undoEdits(); return }
+      if (ctrl && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redoEdits(); return }
+      if (!ctrl && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); splitAtPlayhead(); return }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !ctrl) {
+        const ids = selectedRendIds.length ? selectedRendIds : (selectedRendClipId ? [selectedRendClipId] : [])
+        if (ids.length) { e.preventDefault(); rippleDeleteClips(ids) }
+        return
+      }
+      if (e.key === ',' || e.key === '.') {
+        e.preventDefault()
+        const step = (e.key === '.' ? 1 : -1) / FPS
+        const nt = Math.max(0, Math.min(tlDurationRef.current, currentTimeRef.current + step))
+        setCurrentTime(nt)
+        if (videoRef.current) videoRef.current.currentTime = nt
+        if (audioPlayerRef.current) audioPlayerRef.current.currentTime = nt
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undoEdits, redoEdits, splitAtPlayhead, rippleDeleteClips, selectedRendIds, selectedRendClipId])
 
   const handleGenerateMulti = useCallback(async () => {
     if (!workspace || !id) return
@@ -1322,6 +1518,7 @@ export default function MontageEditor() {
   // Keep refs up-to-date for non-React event handlers (no stale closures)
   pxPerSecRef.current   = pxPerSec
   tlDurationRef.current = timelineDuration
+  currentTimeRef.current = currentTime
 
   return (
     <>
@@ -2041,6 +2238,54 @@ export default function MontageEditor() {
                 </div>
               </div>
 
+              {/* ── Editing toolbar (trim/split/transitions/undo — needs generated clips) ── */}
+              {generatedClips.length > 0 && (() => {
+                const selRendClip = selectedRendIds.length === 0 ? generatedClips.find(c => c.id === selectedRendClipId) : null
+                const ff = Math.floor((currentTime % 1) * FPS)
+                const mm = Math.floor(currentTime / 60), ss = Math.floor(currentTime % 60)
+                const tc = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}:${String(ff).padStart(2, '0')}`
+                return (
+                  <div className="shrink-0 flex items-center gap-1 px-2 overflow-x-auto" style={{ height: 26, background: '#0b0b0b', borderBottom: '1px solid #1a1a1a' }}>
+                    <span className="text-[9px] font-mono tabular-nums px-1 rounded" style={{ background: '#0a0a0a', color: '#4f8ef7', border: '1px solid #1e1e1e' }} title="mm:ss:frames">{tc}</span>
+                    <div className="w-px h-3.5" style={{ background: '#222' }} />
+                    <button onClick={undoEdits} disabled={!canUndoEdits} title="Annuler (Ctrl+Z)" className="p-0.5 rounded disabled:opacity-25 hover:bg-white/10" style={{ color: '#aaa' }}><Undo2 size={12} /></button>
+                    <button onClick={redoEdits} disabled={!canRedoEdits} title="Rétablir (Ctrl+Shift+Z)" className="p-0.5 rounded disabled:opacity-25 hover:bg-white/10" style={{ color: '#aaa' }}><Redo2 size={12} /></button>
+                    <div className="w-px h-3.5" style={{ background: '#222' }} />
+                    <button onClick={splitAtPlayhead} title="Diviser au curseur (B)" className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] hover:bg-white/10" style={{ color: '#ccc' }}><Scissors size={11} /> Diviser</button>
+                    <button onClick={() => setSnapEnabled(s => !s)} title="Aimantation (beats + bords)" className="p-0.5 rounded hover:bg-white/10" style={{ color: snapEnabled ? '#f0a830' : '#555', background: snapEnabled ? 'rgba(240,168,48,0.12)' : 'transparent' }}><Magnet size={12} /></button>
+                    {selectedRendIds.length > 1 && (
+                      <>
+                        <div className="w-px h-3.5" style={{ background: '#222' }} />
+                        <span className="text-[9px]" style={{ color: '#888' }}>{selectedRendIds.length} sél.</span>
+                        <button onClick={() => rippleDeleteClips(selectedRendIds)} className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px]" style={{ color: '#e74c3c', background: '#e74c3c15' }}><Trash2 size={10} /> Suppr.</button>
+                      </>
+                    )}
+                    {selRendClip && (
+                      <>
+                        <div className="w-px h-3.5" style={{ background: '#222' }} />
+                        <span className="text-[8px] uppercase" style={{ color: '#555' }}>Transition</span>
+                        {CLIP_TRANSITIONS.map(tr => (
+                          <button key={tr.id} onClick={() => setClipTransition(selRendClip.id, tr.id)}
+                            className="px-1 py-0.5 rounded text-[9px]"
+                            style={{ color: selRendClip.transition === tr.id ? '#000' : tr.color, background: selRendClip.transition === tr.id ? tr.color : tr.color + '18' }}>
+                            {tr.label}
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    <div className="flex-1" />
+                    {editsDirty && (
+                      <button onClick={applyEditsAndRender} disabled={applyingEdits}
+                        className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-semibold shrink-0 disabled:opacity-50"
+                        style={{ background: S.accent, color: '#000' }}>
+                        {applyingEdits ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+                        Appliquer &amp; re-render
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
+
               <div className="flex flex-1 min-h-0 overflow-hidden">
                 {/* ── Left track labels + zoom controls ── */}
                 <div className="shrink-0 flex flex-col" style={{ width: 52, background: '#0c0c0c', borderRight: '1px solid #1a1a1a' }}>
@@ -2096,7 +2341,7 @@ export default function MontageEditor() {
                         scrubRef.current = true
                         const rect = tlScrollRef.current!.getBoundingClientRect()
                         const x = e.clientX - rect.left + (tlScrollRef.current?.scrollLeft ?? 0)
-                        const t = Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current))
+                        const t = snapValue(Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current)))
                         setCurrentTime(t)
                         if (videoRef.current) videoRef.current.currentTime = t
                         if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
@@ -2105,7 +2350,7 @@ export default function MontageEditor() {
                         scrubRef.current = true
                         const rect = tlScrollRef.current!.getBoundingClientRect()
                         const x = e.touches[0].clientX - rect.left + (tlScrollRef.current?.scrollLeft ?? 0)
-                        const t = Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current))
+                        const t = snapValue(Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current)))
                         setCurrentTime(t)
                         if (videoRef.current) videoRef.current.currentTime = t
                         if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
@@ -2115,7 +2360,7 @@ export default function MontageEditor() {
                         e.preventDefault()
                         const rect = tlScrollRef.current!.getBoundingClientRect()
                         const x = e.touches[0].clientX - rect.left + (tlScrollRef.current?.scrollLeft ?? 0)
-                        const t = Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current))
+                        const t = snapValue(Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current)))
                         setCurrentTime(t)
                         if (videoRef.current) videoRef.current.currentTime = t
                         if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
@@ -2176,15 +2421,23 @@ export default function MontageEditor() {
                           const x = clip.outputStart * pxPerSec
                           const w = Math.max(4, clip.outputDuration * pxPerSec - 1)
                           const score = clip.scoreOverall
-                          // Score-based color: green (>0.7) → yellow (0.4-0.7) → red (<0.4)
                           const clipColor = score >= 0.7 ? '#4ade80' : score >= 0.4 ? '#facc15' : '#e74c3c'
-                          const isSel = selectedRendClipId === clip.id
+                          const isSel = selectedRendClipId === clip.id || selectedRendIds.includes(clip.id)
+                          const trans = CLIP_TRANSITIONS.find(t => t.id === clip.transition)
                           return (
                             <div key={clip.id}
-                              onClick={() => {
-                                setSelectedRendClipId(isSel ? null : clip.id)
-                                setCurrentTime(clip.outputStart)
-                                if (videoRef.current) videoRef.current.currentTime = clip.outputStart
+                              onClick={e => {
+                                if (e.shiftKey || e.ctrlKey || e.metaKey) {
+                                  // multi-select toggle
+                                  setSelectedRendIds(prev => prev.includes(clip.id) ? prev.filter(x2 => x2 !== clip.id) : [...prev, clip.id])
+                                  setSelectedRendClipId(clip.id)
+                                } else {
+                                  setSelectedRendIds([])
+                                  setSelectedRendClipId(isSel && selectedRendIds.length === 0 ? null : clip.id)
+                                  setCurrentTime(clip.outputStart)
+                                  if (videoRef.current) videoRef.current.currentTime = clip.outputStart
+                                  if (audioPlayerRef.current) audioPlayerRef.current.currentTime = clip.outputStart
+                                }
                               }}
                               className="absolute flex items-center justify-between cursor-pointer group"
                               style={{
@@ -2194,32 +2447,35 @@ export default function MontageEditor() {
                                 borderRadius: 2,
                                 boxShadow: isSel ? `0 0 6px ${clipColor}40` : 'none',
                               }}>
+                              {/* Trim handles (drag to change duration) */}
+                              <div title="Rogner le début"
+                                onMouseDown={e => { e.stopPropagation(); beginEditHistory(); clipTrimRef.current = { id: clip.id, side: 'start', startX: e.clientX, startDur: clip.outputDuration, startClipStart: clip.clipStart, startClipEnd: clip.clipEnd } }}
+                                className="absolute left-0 top-0 bottom-0 z-10"
+                                style={{ width: 6, cursor: 'ew-resize', background: isSel ? clipColor + '55' : 'transparent' }} />
+                              <div title="Rogner la fin"
+                                onMouseDown={e => { e.stopPropagation(); beginEditHistory(); clipTrimRef.current = { id: clip.id, side: 'end', startX: e.clientX, startDur: clip.outputDuration, startClipStart: clip.clipStart, startClipEnd: clip.clipEnd } }}
+                                className="absolute right-0 top-0 bottom-0 z-10"
+                                style={{ width: 6, cursor: 'ew-resize', background: isSel ? clipColor + '55' : 'transparent' }} />
                               {/* Score badge */}
                               {w > 20 && (
-                                <span className="absolute right-0.5 top-0.5 text-[5px] font-bold font-mono"
-                                  style={{ color: clipColor + 'cc' }}>
+                                <span className="absolute right-1.5 top-0.5 text-[5px] font-bold font-mono" style={{ color: clipColor + 'cc' }}>
                                   {Math.round(score * 100)}
                                 </span>
                               )}
                               {/* Transition badge */}
-                              {clip.transition !== 'cut' && w > 28 && (
-                                <span className="absolute left-0.5 bottom-0.5 text-[5px] font-mono uppercase"
-                                  style={{ color: '#ffffff40' }}>
-                                  {clip.transition.charAt(0)}
+                              {clip.transition !== 'cut' && w > 24 && trans && (
+                                <span className="absolute left-1.5 bottom-0.5 text-[5px] font-mono uppercase" style={{ color: trans.color }}>
+                                  {trans.label.slice(0, 4)}
                                 </span>
                               )}
                               {/* Delete button (on selected clip) */}
                               {isSel && (
                                 <button
                                   onClick={e => { e.stopPropagation(); handleDeleteRendClip(clip.id) }}
-                                  disabled={deletingClip === clip.id}
-                                  title="Supprimer ce clip du rendu"
-                                  className="absolute -top-3 -right-1 flex items-center justify-center rounded-full z-20 disabled:opacity-40"
+                                  title="Retirer ce clip (Suppr)"
+                                  className="absolute -top-3 -right-1 flex items-center justify-center rounded-full z-20"
                                   style={{ width: 12, height: 12, background: '#e74c3c', border: '1px solid #c0392b' }}>
-                                  {deletingClip === clip.id
-                                    ? <Loader2 size={6} className="animate-spin text-white" />
-                                    : <span style={{ color: 'white', fontSize: 7, lineHeight: 1 }}>×</span>
-                                  }
+                                  <span style={{ color: 'white', fontSize: 7, lineHeight: 1 }}>×</span>
                                 </button>
                               )}
                             </div>

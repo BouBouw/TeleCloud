@@ -157,6 +157,85 @@ export async function runMontageEngine(projectId: string, log: LogFn): Promise<s
   return outputRelPath
 }
 
+/**
+ * Re-render the MAIN output from the user's EDITED clips (trim / split / reorder /
+ * per-clip transitions) WITHOUT re-running scene detection or AI composition —
+ * so manual edits are preserved. outputStart is recomputed cumulatively from the
+ * (possibly edited) durations, so trims and splits ripple correctly.
+ */
+export async function runMontageEngineFromClips(projectId: string, log: LogFn): Promise<string> {
+  const project = await prisma.montageProject.findUniqueOrThrow({
+    where: { id: projectId },
+    include: { clips: { orderBy: { position: 'asc' } }, sourceVideos: true },
+  })
+  if (!project.audioPath) throw new Error('No audio file')
+  if (project.clips.length === 0) throw new Error('No clips to render — generate first')
+
+  const audioAbsPath = path.join(STORAGE_ROOT, project.audioPath)
+  if (!fs.existsSync(audioAbsPath)) throw new Error(`Audio file not found: ${project.audioPath}`)
+
+  const outputDir = path.join(STORAGE_ROOT, project.workspaceId, 'montage')
+  fs.mkdirSync(outputDir, { recursive: true })
+  const outputFilename = `${projectId}_output.mp4`
+  const outputAbs = path.join(outputDir, outputFilename)
+  const outputRel = path.join(project.workspaceId, 'montage', outputFilename)
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const svMap = new Map(project.sourceVideos.map((sv: any) => [sv.id, sv]))
+  const beat: { audioOffset?: number } | null = project.beatData ? JSON.parse(project.beatData) : null
+  const audioOffset = beat?.audioOffset ?? 0
+
+  let cursor = 0
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const timeline = project.clips.map((clip: any) => {
+    const sv = svMap.get(clip.sourceVideoId) as { localPath?: string } | undefined
+    const relPath = sv?.localPath ?? ''
+    const entry = {
+      clip: {
+        id: clip.id, sourceVideoId: clip.sourceVideoId,
+        videoPath: path.join(STORAGE_ROOT, relPath),
+        start: clip.clipStart, end: clip.clipEnd, duration: Math.max(0.1, clip.clipEnd - clip.clipStart),
+        score: { motion: clip.scoreMotion, brightness: clip.scoreBrightness, sharpness: clip.scoreSharpness, overall: clip.scoreOverall, contrast: 0, energy: 0, faceScore: 0, textPenalty: 0 },
+      },
+      outputStart: cursor,
+      outputDuration: Math.max(0.1, clip.outputDuration),
+      effects: (() => { try { return JSON.parse(clip.effects || '[]') } catch { return [] } })(),
+      transition: clip.transition as 'cut' | 'fade' | 'dip_to_black',
+    }
+    cursor += Math.max(0.1, clip.outputDuration)
+    return entry
+  })
+
+  let subtitles: SubtitleSegment[] | undefined
+  let subtitleStyle: SubtitleStyle | undefined
+  if (project.subtitleData) {
+    const p: SubtitleSegment[] | { segments: SubtitleSegment[]; style?: SubtitleStyle } = JSON.parse(project.subtitleData)
+    if (Array.isArray(p)) subtitles = p
+    else { subtitles = p.segments; subtitleStyle = p.style }
+  }
+
+  await log('ASSEMBLING', 8, 'Rendu depuis les clips édités…')
+  await assembleVideo({
+    timeline,
+    audioPath: audioAbsPath,
+    outputPath: outputAbs,
+    ratio: project.ratio,
+    style: project.style,
+    subtitles,
+    subtitleStyle,
+    audioOffset,
+    onProgress: pct => { void log('ASSEMBLING', 8 + Math.round(pct * 0.9), `Encodage… ${pct}%`) },
+  })
+
+  // Invalidate stale portrait/square exports — they no longer match the edited timeline
+  await prisma.montageProject.update({
+    where: { id: projectId },
+    data: { outputPath: outputRel, status: 'COMPLETED', outputPortraitPath: null, outputSquarePath: null },
+  })
+  await log('COMPLETED', 100, `Done → ${outputRel}`)
+  return outputRel
+}
+
 /** Generate the same project for a different aspect ratio (multi-format export) */
 export async function runMontageEngineRatio(
   projectId: string,

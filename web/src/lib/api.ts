@@ -411,12 +411,14 @@ export const montageApi = {
   // Generated clips
   getClips: (wsId: string, id: string) =>
     request<{ clips: MontageClip[] }>(`/workspaces/${wsId}/montage/${id}/clips`),
-  updateClips: (wsId: string, id: string, clips: Array<{ id: string; position?: number; transition?: string }>) =>
+  updateClips: (wsId: string, id: string, clips: Array<{ id: string; position?: number; transition?: string; clipStart?: number; clipEnd?: number; outputStart?: number; outputDuration?: number }>) =>
     request(`/workspaces/${wsId}/montage/${id}/clips`, { method: 'PATCH', body: JSON.stringify({ clips }) }),
-  addClip: (wsId: string, id: string, sourceVideoId: string, clipStart: number, clipEnd: number) =>
-    request<{ clip: MontageClip }>(`/workspaces/${wsId}/montage/${id}/clips`, { method: 'POST', body: JSON.stringify({ sourceVideoId, clipStart, clipEnd }) }),
+  addClip: (wsId: string, id: string, sourceVideoId: string, clipStart: number, clipEnd: number, extra?: { position?: number; outputStart?: number; outputDuration?: number; transition?: string; scoreOverall?: number; scoreMotion?: number; scoreBrightness?: number; scoreSharpness?: number; effects?: string }) =>
+    request<{ clip: MontageClip }>(`/workspaces/${wsId}/montage/${id}/clips`, { method: 'POST', body: JSON.stringify({ sourceVideoId, clipStart, clipEnd, ...extra }) }),
   deleteClip: (wsId: string, id: string, clipId: string) =>
     request(`/workspaces/${wsId}/montage/${id}/clips/${clipId}`, { method: 'DELETE' }),
+  renderEdits: (wsId: string, id: string) =>
+    request<{ job: MontageRenderJob }>(`/workspaces/${wsId}/montage/${id}/render-edits`, { method: 'POST' }),
   getBeatData: (wsId: string, id: string) =>
     request<{ beatData: BeatData | null }>(`/workspaces/${wsId}/montage/${id}/beat-data`),
   saveSubtitles: (wsId: string, id: string, segments: Array<{ start: number; end: number; text: string }>, style?: Record<string, unknown>) =>

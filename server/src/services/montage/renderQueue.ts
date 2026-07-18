@@ -2,7 +2,7 @@
  * Montage render queue – polls for QUEUED jobs and runs the engine.
  */
 import prisma from '../../lib/prisma'
-import { runMontageEngine } from './engine'
+import { runMontageEngine, runMontageEngineFromClips } from './engine'
 import * as notifs from '../notifications'
 
 const POLL_INTERVAL_MS = 4000
@@ -10,8 +10,15 @@ let activeJobs = 0
 const MAX_WORKERS = Number(process.env.MONTAGE_MAX_WORKERS ?? 2)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
+// Projects whose next queued render must render FROM the user's edited clips
+// (trim/split/reorder/transitions) instead of re-composing from scratch. Kept in
+// memory — the queue runs in the same process, so no schema/migration is needed.
+const fromClipsProjects = new Set<string>()
+
 export const montageQueue = {
-  async enqueue(projectId: string) {
+  async enqueue(projectId: string, opts?: { fromClips?: boolean }) {
+    if (opts?.fromClips) fromClipsProjects.add(projectId)
+    else fromClipsProjects.delete(projectId)
     const job = await prisma.montageRenderJob.upsert({
       where: { projectId },
       create: { projectId, status: 'QUEUED', progress: 0, logs: '', currentStep: '' },
@@ -72,7 +79,10 @@ async function processJob(job: { id: string; projectId: string; logs: string }) 
   }
 
   try {
-    await runMontageEngine(projectId, log)
+    const fromClips = fromClipsProjects.has(projectId)
+    fromClipsProjects.delete(projectId)
+    if (fromClips) await runMontageEngineFromClips(projectId, log)
+    else await runMontageEngine(projectId, log)
     await prisma.montageRenderJob.update({
       where: { id: jobId },
       data: { status: 'DONE', progress: 100, currentStep: 'COMPLETED', finishedAt: new Date() },

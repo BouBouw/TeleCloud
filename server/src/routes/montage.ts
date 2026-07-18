@@ -434,6 +434,27 @@ router.post('/:id/generate', async (req, res) => {
   }
 })
 
+// ── POST /:id/render-edits ── re-render from the user's EDITED clips ──────────
+// Preserves manual trim / split / reorder / per-clip transitions instead of
+// re-composing from the AI scoring (which `generate` does).
+router.post('/:id/render-edits', async (req, res) => {
+  try {
+    await requireMember(req.params.wsId, req.user!.userId)
+    const project = await prisma.montageProject.findFirst({
+      where: { id: req.params.id, workspaceId: req.params.wsId },
+      select: { id: true, audioPath: true, _count: { select: { clips: true } } },
+    })
+    if (!project) { res.status(404).json({ error: 'Project not found' }); return }
+    if (!project.audioPath) { res.status(422).json({ error: 'Upload audio first' }); return }
+    if (project._count.clips === 0) { res.status(422).json({ error: 'Generate the montage once before editing clips' }); return }
+
+    const job = await montageQueue.enqueue(req.params.id, { fromClips: true })
+    res.json({ job })
+  } catch (e: any) {
+    res.status(e.status ?? 500).json({ error: e.message })
+  }
+})
+
 // ── GET /api/workspaces/:wsId/montage/:id/status ── job status ────────────────
 router.get('/:id/status', async (req, res) => {
   try {
@@ -836,15 +857,22 @@ router.get('/:id/clips', async (req, res) => {
 router.patch('/:id/clips', async (req, res) => {
   try {
     await requireMember(req.params.wsId, req.user!.userId)
-    const { clips } = req.body as { clips: Array<{ id: string; position?: number; transition?: string }> }
+    const { clips } = req.body as { clips: Array<{
+      id: string; position?: number; transition?: string
+      clipStart?: number; clipEnd?: number; outputStart?: number; outputDuration?: number
+    }> }
     if (!Array.isArray(clips)) { res.status(400).json({ error: 'clips must be an array' }); return }
     await prisma.$transaction(
       clips.map(c =>
         prisma.montageClip.update({
           where: { id: c.id },
           data: {
-            ...(c.position  !== undefined && { position:   c.position }),
-            ...(c.transition !== undefined && { transition: c.transition }),
+            ...(c.position       !== undefined && { position:       c.position }),
+            ...(c.transition     !== undefined && { transition:     c.transition }),
+            ...(c.clipStart      !== undefined && { clipStart:      c.clipStart }),
+            ...(c.clipEnd        !== undefined && { clipEnd:        c.clipEnd }),
+            ...(c.outputStart    !== undefined && { outputStart:    c.outputStart }),
+            ...(c.outputDuration !== undefined && { outputDuration: c.outputDuration }),
           },
         }),
       ),
@@ -859,22 +887,32 @@ router.patch('/:id/clips', async (req, res) => {
 router.post('/:id/clips', async (req, res) => {
   try {
     await requireMember(req.params.wsId, req.user!.userId)
-    const { sourceVideoId, clipStart, clipEnd } = req.body as { sourceVideoId: string; clipStart: number; clipEnd: number }
+    const b = req.body as {
+      sourceVideoId: string; clipStart: number; clipEnd: number
+      position?: number; outputStart?: number; outputDuration?: number; transition?: string
+      scoreOverall?: number; scoreMotion?: number; scoreBrightness?: number; scoreSharpness?: number; effects?: string
+    }
+    const { sourceVideoId, clipStart, clipEnd } = b
     if (!sourceVideoId || clipStart == null || clipEnd == null) {
       res.status(400).json({ error: 'sourceVideoId, clipStart and clipEnd are required' }); return
     }
-    // Append at the end of existing clips
+    // Default: append at the end of existing clips (split passes an explicit position)
     const existing = await prisma.montageClip.count({ where: { projectId: req.params.id } })
     const clip = await prisma.montageClip.create({
       data: {
         projectId: req.params.id,
         sourceVideoId,
-        position: existing,
+        position:       b.position       ?? existing,
         clipStart,
         clipEnd,
-        outputStart: 0,
-        outputDuration: clipEnd - clipStart,
-        transition: 'cut',
+        outputStart:    b.outputStart    ?? 0,
+        outputDuration: b.outputDuration ?? (clipEnd - clipStart),
+        transition:     b.transition     ?? 'cut',
+        ...(b.effects        !== undefined && { effects:        b.effects }),
+        ...(b.scoreOverall   !== undefined && { scoreOverall:   b.scoreOverall }),
+        ...(b.scoreMotion    !== undefined && { scoreMotion:    b.scoreMotion }),
+        ...(b.scoreBrightness!== undefined && { scoreBrightness:b.scoreBrightness }),
+        ...(b.scoreSharpness !== undefined && { scoreSharpness: b.scoreSharpness }),
       },
     })
     res.status(201).json({ clip })
