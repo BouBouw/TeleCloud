@@ -192,7 +192,7 @@ export default function Studio() {
     : libTracks
 
   return (
-    <div className="flex flex-col fade-in relative" style={{ height: '100%', overflow: 'hidden', background: '#141414', fontFamily: 'monospace' }}>
+    <div className="flex flex-col relative" style={{ height: '100%', overflow: 'hidden', background: '#141414', fontFamily: 'monospace' }}>
       {/* hidden inputs */}
       <input ref={mainInputRef} type="file" accept="audio/*" className="hidden"
         onChange={e => { const f = e.target.files?.[0]; if (f) api.loadMainFromFile(f); e.target.value = '' }} />

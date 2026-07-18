@@ -288,10 +288,14 @@ async function encodeSegment(
   const outputDuration = renderDuration ?? entry.outputDuration
   const effect  = effects[0]
   const clipDur = Math.min(outputDuration, clip.duration)
-  // Freeze the last frame if the clip is shorter than its output slot.
-  // This ensures every segment fills its exact allotted duration so the
-  // concat total matches targetDuration precisely (fixes "60s → ~52s" bug).
   const padDur  = outputDuration - clipDur
+  // When a clip's source footage is shorter than its slot we must still fill the
+  // slot. Freezing the last frame (tpad clone) leaves the video "stuck on one
+  // frame" — very visible on long slots like the outro. Instead we retime the clip
+  // to fill the slot (smooth slow-mo, keeps moving). Only fall back to a freeze
+  // when the clip already carries a speed/slow effect (retiming twice would fight).
+  const hasTimeEffect = effect && (effect.type === 'slow_motion' || effect.type === 'speed_ramp')
+  const fillStretch = padDur > 0.04 && !hasTimeEffect && clipDur > 0.05
 
   return new Promise<void>((resolve, reject) => {
     const vfParts: string[] = [
@@ -320,11 +324,14 @@ async function encodeSegment(
     const effectFilter = buildEffectFilter(effect, clipDur, outW, outH)
     if (effectFilter) vfParts.push(effectFilter)
 
-    // Freeze last frame first — tpad must come BEFORE fade so the fade-out
-    // is applied to the full outputDuration (not just the raw clipDur).
-    // Without this, tpad would extend a black last-frame, creating an extra
-    // dark gap between clips (bug: ~0.3s of unexpected black per cut).
-    if (padDur > 0.01) vfParts.push(`tpad=stop_mode=clone:stop_duration=${padDur.toFixed(3)}`)
+    // Fill a too-short clip to its slot. Prefer a smooth retime (no frozen frame);
+    // fall back to a last-frame freeze only for speed-effect clips. Must come BEFORE
+    // any dip-to-black fade so the fade is anchored to the full outputDuration.
+    if (fillStretch) {
+      vfParts.push(`setpts=${(outputDuration / clipDur).toFixed(5)}*PTS`)
+    } else if (padDur > 0.04) {
+      vfParts.push(`tpad=stop_mode=clone:stop_duration=${padDur.toFixed(3)}`)
+    }
 
     // Dip-to-black: fade in from black at start, fade out to black at end of
     // the FULL output slot (anchor to outputDuration, not clipDur).
