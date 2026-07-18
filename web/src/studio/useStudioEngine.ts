@@ -28,6 +28,18 @@ function newTrack(partial: Partial<Track> & Pick<Track, 'id' | 'name' | 'color' 
 
 export interface StudioClipboard { srcData: Float32Array; sampleRate: number; duration: number; name: string }
 
+/** One track as persisted in a saved project (audio itself is reloaded from `trackId`). */
+export interface SavedStudioTrack {
+  name: string; color: string; kind: Track['kind']; stem?: StemKind; trackId?: string
+  offset: number; gain: number; pan: number; muted: boolean; solo: boolean
+  cuts: Array<{ start: number; end: number }>
+}
+export interface StudioProjectData {
+  version: number
+  master: { bpm: number; rate: number; loop: boolean; masterVol: number; eq: EQBand[]; fx: EffectParams }
+  tracks: SavedStudioTrack[]
+}
+
 export function useStudioEngine() {
   const engine = useMemo(() => new StudioEngine(DEFAULT_EQ), [])
 
@@ -423,6 +435,51 @@ export function useStudioEngine() {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   }, [engine, eq, fx, masterVol])
 
+  /* ── Project save / restore ── */
+  const serialize = useCallback((): StudioProjectData => {
+    const mainTrackId = tracksRef.current.find(t => t.kind === 'main')?.trackId
+    return {
+      version: 1,
+      master: { bpm, rate, loop, masterVol, eq, fx },
+      // Only server-backed tracks are restorable (their audio is refetched by trackId).
+      tracks: tracksRef.current
+        .filter(t => t.trackId || (t.stem && mainTrackId))
+        .map(t => ({
+          name: t.name, color: t.color, kind: t.kind, stem: t.stem,
+          trackId: t.trackId ?? (t.stem ? mainTrackId : undefined),
+          offset: t.offset, gain: t.gain, pan: t.pan, muted: t.muted, solo: t.solo,
+          cuts: t.cuts.map(c => ({ start: c.start, end: c.end })),
+        })),
+    }
+  }, [bpm, rate, loop, masterVol, eq, fx])
+
+  /** Rebuild the session from a saved project. `resolveUrl` maps a saved track to a fetch URL. */
+  const restoreProject = useCallback(async (
+    data: StudioProjectData,
+    resolveUrl: (t: SavedStudioTrack) => string | null,
+  ) => {
+    engine.stop(); setPlaying(false); setPlayhead(0)
+    cancelAnimationFrame(rafRef.current)
+    const m = data.master ?? ({} as StudioProjectData['master'])
+    setBpm(m.bpm ?? 120)
+    setRateState(m.rate ?? 1); rateRef.current = m.rate ?? 1
+    setLoop(!!m.loop)
+    setMasterVol(m.masterVol ?? 0.9)
+    if (m.eq) setEq(m.eq)
+    if (m.fx) setFx(m.fx)
+    pastRef.current = []; futureRef.current = []; syncHist()
+    const placeholders = (data.tracks ?? []).map(t => newTrack({
+      id: nextId(t.kind), name: t.name, color: t.color, kind: t.kind, stem: t.stem, trackId: t.trackId,
+      offset: t.offset ?? 0, gain: t.gain ?? 0.85, pan: t.pan ?? 0, muted: !!t.muted, solo: !!t.solo, cuts: t.cuts ?? [],
+    }))
+    commit(placeholders)
+    await Promise.all(placeholders.map(async (ph, i) => {
+      const url = resolveUrl(data.tracks[i]); if (!url) return
+      try { const ab = await fetch(url).then(r => r.arrayBuffer()); await decodeInto(ph.id, ab) }
+      catch { /* skip unreadable track */ }
+    }))
+  }, [engine, commit, decodeInto, syncHist])
+
   /* ── EQ / FX setters ── */
   const setEqBand = useCallback((i: number, gain: number) => setEq(p => p.map((b, j) => j === i ? { ...b, gain } : b)), [])
   const resetEq = useCallback(() => setEq(DEFAULT_EQ), [])
@@ -452,6 +509,8 @@ export function useStudioEngine() {
     startRecording, stopRecording,
     // stems + export
     separateStems, exportMix, setStemError,
+    // project save / restore
+    serialize, restoreProject,
     // master
     setEqBand, resetEq, patchFx, setMasterVol,
   }

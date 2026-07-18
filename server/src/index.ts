@@ -14,6 +14,7 @@ import botsRouter from './routes/bots'
 import galleryRouter from './routes/gallery'
 import adminRouter from './routes/admin'
 import montageRouter from './routes/montage'
+import studioRouter from './routes/studio'
 import socialRouter from './routes/social'
 import notificationsRouter from './routes/notifications'
 import tunnelRouter from './routes/tunnel'
@@ -68,6 +69,7 @@ app.use('/api/workspaces/:wsId/tracks', tracksRouter)
 app.use('/api/workspaces/:wsId/gallery', galleryRouter)
 app.use('/api/workspaces/:wsId/bots', botsRouter)
 app.use('/api/workspaces/:wsId/montage', montageRouter)
+app.use('/api/workspaces/:wsId/studio', studioRouter)
 app.use('/api/workspaces/:wsId/social', socialRouter)
 app.use('/api/workspaces/:wsId/notifications', notificationsRouter)
 app.use('/api/admin', adminRouter)

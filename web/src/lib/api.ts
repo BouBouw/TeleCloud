@@ -439,6 +439,20 @@ export const montageApi = {
   },
 }
 
+// ── Studio projects (audio studio save/restore) ─────────────────────────────
+export interface StudioProjectMeta { id: string; name: string; createdAt: string; updatedAt: string }
+export interface StudioProject extends StudioProjectMeta { data: string }
+
+export const studioApi = {
+  list:   (wsId: string) => request<{ projects: StudioProjectMeta[] }>(`/workspaces/${wsId}/studio`),
+  get:    (wsId: string, id: string) => request<{ project: StudioProject }>(`/workspaces/${wsId}/studio/${id}`),
+  create: (wsId: string, name: string, data: unknown) =>
+    request<{ project: StudioProject }>(`/workspaces/${wsId}/studio`, { method: 'POST', body: JSON.stringify({ name, data }) }),
+  update: (wsId: string, id: string, patch: { name?: string; data?: unknown }) =>
+    request<{ project: StudioProject }>(`/workspaces/${wsId}/studio/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  delete: (wsId: string, id: string) => request(`/workspaces/${wsId}/studio/${id}`, { method: 'DELETE' }),
+}
+
 // ── Social ────────────────────────────────────────────────────────────────────
 export type SocialPlatform = 'TIKTOK' | 'INSTAGRAM' | 'YOUTUBE' | 'TWITTER' | 'FACEBOOK' | 'SNAPCHAT' | 'LINKEDIN' | 'PINTEREST'
 export interface SocialAccount {

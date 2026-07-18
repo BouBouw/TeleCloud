@@ -1,17 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import {
   Play, Pause, Square, SkipBack, Download, Music2, Loader2, Repeat,
   ZoomIn, ZoomOut, Activity, Keyboard, MousePointer, Move, X, Search,
   Scissors, Copy, RotateCcw, Trash2, Undo2, Plus, Wand2,
   Mic, Redo2, TrendingUp, TrendingDown, VolumeX, Crop, FlipHorizontal2,
-  Maximize2, SplitSquareHorizontal,
+  Maximize2, SplitSquareHorizontal, FolderOpen, Save, FilePlus2, Check,
 } from 'lucide-react'
 import { useI18n } from '../i18n'
-import { trackApi } from '../lib/api'
-import type { Track as LibTrack } from '../lib/api'
+import { trackApi, studioApi } from '../lib/api'
+import type { Track as LibTrack, StudioProjectMeta } from '../lib/api'
 import { useWorkspaces } from '../store/workspaceStore'
-import { useStudioEngine } from '../studio/useStudioEngine'
+import { useStudioEngine, type StudioProjectData } from '../studio/useStudioEngine'
+import { DEFAULT_EQ, DEFAULT_FX } from '../studio/constants'
 import type { Tool } from '../studio/types'
 import { fmtTime } from '../studio/waveform'
 import { Timeline } from '../studio/components/Timeline'
@@ -34,6 +35,15 @@ export default function Studio() {
   const [isExporting, setIsExporting] = useState(false)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; trackId: string } | null>(null)
 
+  /* ── Projects (save / restore / autosave) ── */
+  const [projects, setProjects] = useState<StudioProjectMeta[]>([])
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
+  const [projectName, setProjectName] = useState('Sans titre')
+  const [showProjects, setShowProjects] = useState(false)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [restoring, setRestoring] = useState(false)
+  const lastSavedRef = useRef('')
+
   const mainInputRef = useRef<HTMLInputElement>(null)
   const extraInputRef = useRef<HTMLInputElement>(null)
 
@@ -41,7 +51,79 @@ export default function Studio() {
   useEffect(() => {
     if (!workspace) { setLoadingLib(false); return }
     trackApi.list(workspace.id).then(({ tracks }) => setLibTracks(tracks)).finally(() => setLoadingLib(false))
+    studioApi.list(workspace.id).then(({ projects: p }) => setProjects(p)).catch(() => {})
   }, [workspace])
+
+  /* ── Save / restore ── */
+  const saveProject = useCallback(async (opts?: { auto?: boolean }) => {
+    if (!workspace) return
+    const data = api.serialize()
+    if (data.tracks.length === 0) return               // nothing server-backed to restore
+    const json = JSON.stringify(data)
+    if (opts?.auto && json === lastSavedRef.current) return  // no change since last save
+    setSaveState('saving')
+    try {
+      if (currentProjectId) {
+        await studioApi.update(workspace.id, currentProjectId, { name: projectName, data: json })
+      } else {
+        const { project } = await studioApi.create(workspace.id, projectName, json)
+        setCurrentProjectId(project.id)
+      }
+      lastSavedRef.current = json
+      setSaveState('saved')
+      studioApi.list(workspace.id).then(({ projects: p }) => setProjects(p)).catch(() => {})
+    } catch { setSaveState('error') }
+  }, [workspace, api, currentProjectId, projectName])
+
+  const saveRef = useRef(saveProject); saveRef.current = saveProject
+
+  /* auto-save every 15 s (only when something restorable changed) */
+  useEffect(() => {
+    const iv = setInterval(() => { void saveRef.current({ auto: true }) }, 15000)
+    return () => { clearInterval(iv); void saveRef.current({ auto: true }) } // final flush
+  }, [])
+
+  /* reflect "unsaved changes" vs "saved" in the toolbar indicator */
+  useEffect(() => {
+    setSaveState(s => {
+      if (s === 'saving') return s
+      const clean = JSON.stringify(api.serialize()) === lastSavedRef.current && lastSavedRef.current !== ''
+      return clean ? 'saved' : 'idle'
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api.tracks, api.bpm, api.rate, api.loop, api.masterVol, api.eq, api.fx])
+
+  const resolveUrl = useCallback((tr: { trackId?: string; stem?: 'vocals' | 'instrumental' }): string | null => {
+    if (!workspace || !tr.trackId) return null
+    return tr.stem ? trackApi.stemUrl(workspace.id, tr.trackId, tr.stem) : trackApi.streamUrl(workspace.id, tr.trackId)
+  }, [workspace])
+
+  const openProject = useCallback(async (id: string) => {
+    if (!workspace) return
+    setShowProjects(false); setRestoring(true)
+    try {
+      const { project } = await studioApi.get(workspace.id, id)
+      const data = JSON.parse(project.data) as StudioProjectData
+      await api.restoreProject(data, resolveUrl)
+      setCurrentProjectId(project.id); setProjectName(project.name)
+      lastSavedRef.current = JSON.stringify(api.serialize())
+      setSaveState('saved')
+    } catch (e) { alert((e as Error).message) }
+    finally { setRestoring(false) }
+  }, [workspace, api, resolveUrl])
+
+  const newProject = useCallback(async () => {
+    await api.restoreProject({ version: 1, master: { bpm: 120, rate: 1, loop: false, masterVol: 0.9, eq: DEFAULT_EQ, fx: DEFAULT_FX }, tracks: [] }, () => null)
+    setCurrentProjectId(null); setProjectName('Sans titre'); lastSavedRef.current = ''; setSaveState('idle'); setShowProjects(false)
+  }, [api])
+
+  const deleteProject = useCallback(async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation()
+    if (!workspace || !window.confirm('Supprimer ce projet ?')) return
+    await studioApi.delete(workspace.id, id).catch(() => {})
+    setProjects(prev => prev.filter(p => p.id !== id))
+    if (currentProjectId === id) { setCurrentProjectId(null); setProjectName('Sans titre'); lastSavedRef.current = '' }
+  }, [workspace, currentProjectId])
 
   /* ── Keyboard shortcuts ── */
   useEffect(() => {
@@ -68,7 +150,7 @@ export default function Studio() {
         case 'KeyR': if (!e.ctrlKey && !e.metaKey) { e.preventDefault(); api.recording ? api.stopRecording() : api.startRecording() }; break
         case 'KeyB': if (activeId && !e.ctrlKey && !e.metaKey) { e.preventDefault(); api.splitAtPlayhead(activeId) }; break
         case 'KeyL': if (!e.ctrlKey) api.toggleLoop(); break
-        case 'KeyS': if (!e.ctrlKey) setTool('select'); break
+        case 'KeyS': if (e.ctrlKey || e.metaKey) { e.preventDefault(); void saveRef.current() } else setTool('select'); break
         case 'Home': api.seek(0); break
         case 'End': api.seek(api.total); break
         case 'ArrowLeft': e.preventDefault(); api.seek(api.getPlayhead() - (e.shiftKey ? 10 : 2)); break
@@ -115,6 +197,38 @@ export default function Studio() {
       {/* ═══ TOOLBAR ═══ */}
       <div className="shrink-0 flex items-center gap-2 px-3 border-b overflow-x-auto" style={{ height: 44, background: '#242424', borderColor: '#333', minWidth: 0 }}>
         <button onClick={() => setShowLibrary(p => !p)} className="px-2 py-1 rounded text-xs" style={{ background: showLibrary ? '#3a3a3a' : 'transparent', color: '#aaa' }}><Music2 size={14} /></button>
+        <div className="w-px h-6" style={{ background: '#333' }} />
+        {/* Projects */}
+        <button onClick={() => setShowProjects(v => !v)} title="Projets" className="p-1.5 rounded hover:bg-white/10" style={{ background: showProjects ? '#3a3a3a' : 'transparent', color: '#aaa' }}><FolderOpen size={14} /></button>
+        <input value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="Projet…" className="px-1.5 py-0.5 rounded text-xs outline-none tabular-nums" style={{ width: 108, background: '#0a0a0a', color: '#ccc', border: '1px solid #333' }} />
+        <button onClick={() => saveProject()} disabled={saveState === 'saving'} title="Sauvegarder (Ctrl+S)" className="p-1.5 rounded hover:bg-white/10" style={{ color: saveState === 'saved' ? '#2eb872' : saveState === 'error' ? '#e74c3c' : '#aaa' }}>
+          {saveState === 'saving' ? <Loader2 size={13} className="animate-spin" /> : saveState === 'saved' ? <Check size={13} /> : <Save size={13} />}
+        </button>
+        {showProjects && (
+          <>
+            <div className="fixed inset-0" style={{ zIndex: 60 }} onClick={() => setShowProjects(false)} />
+            <div className="rounded-lg overflow-hidden" style={{ position: 'fixed', left: 8, top: 46, width: 264, zIndex: 61, background: '#1e1e1e', border: '1px solid #333', boxShadow: '0 8px 24px rgba(0,0,0,0.65)' }}>
+              <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: '1px solid #2a2a2a' }}>
+                <span className="text-[10px] uppercase tracking-wider" style={{ color: '#666' }}>Projets récents</span>
+                <button onClick={newProject} className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded" style={{ color: '#2eb872', background: '#2eb87215' }}><FilePlus2 size={11} /> Nouveau</button>
+              </div>
+              <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+                {projects.length === 0
+                  ? <p className="text-[10px] text-center py-5" style={{ color: '#555' }}>Aucun projet sauvegardé</p>
+                  : projects.map(p => (
+                    <div key={p.id} onClick={() => openProject(p.id)} className="group flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-white/5" style={{ background: currentProjectId === p.id ? '#2a2a2a' : 'transparent', borderLeft: currentProjectId === p.id ? '2px solid #4f8ef7' : '2px solid transparent' }}>
+                      <Music2 size={11} className="shrink-0" style={{ color: currentProjectId === p.id ? '#4f8ef7' : '#555' }} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] truncate" style={{ color: '#ccc' }}>{p.name}</p>
+                        <p className="text-[8px]" style={{ color: '#555' }}>{new Date(p.updatedAt).toLocaleString()}</p>
+                      </div>
+                      <button onClick={e => deleteProject(e, p.id)} title="Supprimer" className="opacity-0 group-hover:opacity-100 shrink-0 p-0.5" style={{ color: '#e74c3c' }}><Trash2 size={11} /></button>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </>
+        )}
         <div className="w-px h-6" style={{ background: '#333' }} />
         <button onClick={() => api.seek(0)} className="p-1.5 rounded hover:bg-white/10" style={{ color: '#aaa' }}><SkipBack size={14} /></button>
         <button onClick={api.stop} className="p-1.5 rounded hover:bg-white/10" style={{ color: '#aaa' }}><Square size={14} /></button>
@@ -345,6 +459,15 @@ export default function Studio() {
       {api.stemError && (
         <div className="fixed bottom-4 right-4 px-4 py-2 rounded text-xs z-50" style={{ background: '#1a0808', color: '#e74c3c', border: '1px solid #3a1010' }} onClick={() => api.setStemError(null)}>
           {api.stemError}
+        </div>
+      )}
+
+      {restoring && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.6)' }}>
+          <div className="flex items-center gap-2 px-4 py-3 rounded-lg" style={{ background: '#1e1e1e', border: '1px solid #333', color: '#ccc' }}>
+            <Loader2 size={16} className="animate-spin" style={{ color: '#4f8ef7' }} />
+            <span className="text-xs">Chargement du projet…</span>
+          </div>
         </div>
       )}
     </div>

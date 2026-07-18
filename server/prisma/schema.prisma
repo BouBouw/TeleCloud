@@ -48,6 +48,7 @@ model Workspace {
   videoFiles      VideoFile[]
   bots            Bot[]
   montageProjects MontageProject[]
+  studioProjects  StudioProject[]
   socialAccounts  SocialAccount[]
   socialPosts     SocialPost[]
   conversionJobs  ConversionJob[]
@@ -273,4 +274,17 @@ model ConversionJob {
   errorMsg     String?
   fileSize     Int?
   createdAt    DateTime  @default(now())
+}
+
+// ─── Studio Projects (audio studio save/restore) ─────────────────────
+model StudioProject {
+  id          String    @id @default(uuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String    @default("Sans titre")
+  data        String    // JSON: serialized studio state (tracks metadata + master params)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([workspaceId])
 }
