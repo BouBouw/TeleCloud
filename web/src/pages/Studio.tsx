@@ -46,6 +46,7 @@ export default function Studio() {
 
   const mainInputRef = useRef<HTMLInputElement>(null)
   const extraInputRef = useRef<HTMLInputElement>(null)
+  const projBtnRef = useRef<HTMLButtonElement>(null)
 
   /* ── Library fetch ── */
   useEffect(() => {
@@ -166,7 +167,11 @@ export default function Studio() {
   const openPanel = (tab: 'mixer' | 'eq' | 'effects') => {
     const mobile = window.innerWidth < 768
     setFloatWin(p => p ? { ...p, tab, minimized: false } : {
-      tab, x: mobile ? 0 : 180, y: mobile ? Math.max(0, window.innerHeight - 300) : 80,
+      tab,
+      // Center-ish in the viewport (position:fixed is now viewport-relative after
+      // the fade-in transform fix), clamped so it never lands under the app sidebar.
+      x: mobile ? 0 : Math.max(240, Math.round(window.innerWidth / 2 - 330)),
+      y: mobile ? Math.max(0, window.innerHeight - 300) : 90,
       w: mobile ? window.innerWidth : 660, h: 300, minimized: false,
     })
   }
@@ -187,7 +192,7 @@ export default function Studio() {
     : libTracks
 
   return (
-    <div className="flex flex-col fade-in relative" style={{ minHeight: 'calc(105vh - 96px)', background: '#141414', fontFamily: 'monospace' }}>
+    <div className="flex flex-col fade-in relative" style={{ height: '100%', overflow: 'hidden', background: '#141414', fontFamily: 'monospace' }}>
       {/* hidden inputs */}
       <input ref={mainInputRef} type="file" accept="audio/*" className="hidden"
         onChange={e => { const f = e.target.files?.[0]; if (f) api.loadMainFromFile(f); e.target.value = '' }} />
@@ -199,15 +204,19 @@ export default function Studio() {
         <button onClick={() => setShowLibrary(p => !p)} className="px-2 py-1 rounded text-xs" style={{ background: showLibrary ? '#3a3a3a' : 'transparent', color: '#aaa' }}><Music2 size={14} /></button>
         <div className="w-px h-6" style={{ background: '#333' }} />
         {/* Projects */}
-        <button onClick={() => setShowProjects(v => !v)} title="Projets" className="p-1.5 rounded hover:bg-white/10" style={{ background: showProjects ? '#3a3a3a' : 'transparent', color: '#aaa' }}><FolderOpen size={14} /></button>
+        <button ref={projBtnRef} onClick={() => setShowProjects(v => !v)} title="Projets" className="p-1.5 rounded hover:bg-white/10" style={{ background: showProjects ? '#3a3a3a' : 'transparent', color: '#aaa' }}><FolderOpen size={14} /></button>
         <input value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="Projet…" className="px-1.5 py-0.5 rounded text-xs outline-none tabular-nums" style={{ width: 108, background: '#0a0a0a', color: '#ccc', border: '1px solid #333' }} />
         <button onClick={() => saveProject()} disabled={saveState === 'saving'} title="Sauvegarder (Ctrl+S)" className="p-1.5 rounded hover:bg-white/10" style={{ color: saveState === 'saved' ? '#2eb872' : saveState === 'error' ? '#e74c3c' : '#aaa' }}>
           {saveState === 'saving' ? <Loader2 size={13} className="animate-spin" /> : saveState === 'saved' ? <Check size={13} /> : <Save size={13} />}
         </button>
-        {showProjects && (
+        {showProjects && (() => {
+          const r = projBtnRef.current?.getBoundingClientRect()
+          const left = Math.max(4, Math.min((r?.left ?? 8), window.innerWidth - 268))
+          const top = (r?.bottom ?? 44) + 4
+          return (
           <>
             <div className="fixed inset-0" style={{ zIndex: 60 }} onClick={() => setShowProjects(false)} />
-            <div className="rounded-lg overflow-hidden" style={{ position: 'fixed', left: 8, top: 46, width: 264, zIndex: 61, background: '#1e1e1e', border: '1px solid #333', boxShadow: '0 8px 24px rgba(0,0,0,0.65)' }}>
+            <div className="rounded-lg overflow-hidden" style={{ position: 'fixed', left, top, width: 264, zIndex: 61, background: '#1e1e1e', border: '1px solid #333', boxShadow: '0 8px 24px rgba(0,0,0,0.65)' }}>
               <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: '1px solid #2a2a2a' }}>
                 <span className="text-[10px] uppercase tracking-wider" style={{ color: '#666' }}>Projets récents</span>
                 <button onClick={newProject} className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded" style={{ color: '#2eb872', background: '#2eb87215' }}><FilePlus2 size={11} /> Nouveau</button>
@@ -228,7 +237,8 @@ export default function Studio() {
               </div>
             </div>
           </>
-        )}
+          )
+        })()}
         <div className="w-px h-6" style={{ background: '#333' }} />
         <button onClick={() => api.seek(0)} className="p-1.5 rounded hover:bg-white/10" style={{ color: '#aaa' }}><SkipBack size={14} /></button>
         <button onClick={api.stop} className="p-1.5 rounded hover:bg-white/10" style={{ color: '#aaa' }}><Square size={14} /></button>
@@ -417,15 +427,38 @@ export default function Studio() {
         const canSeparate = track?.kind === 'main' && !!track.trackId && !api.separating
         const hasCuts = (track?.cuts.length ?? 0) > 0
         const hasBuffer = !!track?.buffer
-        const mx = Math.min(ctxMenu.x, window.innerWidth - 224)
-        const my = Math.min(ctxMenu.y, window.innerHeight - 320)
+        const mx = Math.min(ctxMenu.x, window.innerWidth - 236)
+        const my = Math.min(ctxMenu.y, window.innerHeight - 430)
         const item = (disabled: boolean, danger = false): React.CSSProperties => ({ color: disabled ? '#3a3a3a' : danger ? '#e74c3c' : '#ccc', background: 'transparent', cursor: disabled ? 'not-allowed' : 'pointer' })
         const hover = (danger = false) => (e: React.MouseEvent<HTMLButtonElement>) => { const el = e.currentTarget; if (!el.disabled) el.style.background = danger ? 'rgba(231,76,60,0.12)' : '#2a2a2a' }
         const out = (e: React.MouseEvent<HTMLButtonElement>) => { e.currentTarget.style.background = 'transparent' }
         return (
           <>
             <div className="fixed inset-0" style={{ zIndex: 300 }} onClick={() => setCtxMenu(null)} onContextMenu={e => { e.preventDefault(); setCtxMenu(null) }} />
-            <div style={{ position: 'fixed', left: mx, top: my, zIndex: 301, background: '#1e1e1e', border: '1px solid #333', borderRadius: 6, padding: '4px 0', boxShadow: '0 8px 24px rgba(0,0,0,0.65)', minWidth: 212 }}>
+            <div style={{ position: 'fixed', left: mx, top: my, zIndex: 301, background: '#1e1e1e', border: '1px solid #333', borderRadius: 6, padding: '4px 0', boxShadow: '0 8px 24px rgba(0,0,0,0.65)', minWidth: 224 }}>
+              {/* ── Per-track mixer ── */}
+              <div className="px-3 py-2" style={{ borderBottom: '1px solid #2a2a2a' }}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-bold truncate" style={{ color: track?.color ?? '#ccc', maxWidth: 130 }} title={track?.name}>{track?.name}</span>
+                  <div className="flex gap-1">
+                    <button onClick={() => api.toggleSolo(ctxMenu.trackId)} title="Solo" className="rounded text-[8px] font-bold flex items-center justify-center" style={{ width: 16, height: 16, background: track?.solo ? '#f0a830' : '#2a2a2a', color: track?.solo ? '#000' : '#777' }}>S</button>
+                    <button onClick={() => api.toggleMute(ctxMenu.trackId)} title="Muet" className="rounded text-[8px] font-bold flex items-center justify-center" style={{ width: 16, height: 16, background: track?.muted ? '#e74c3c' : '#2a2a2a', color: track?.muted ? '#fff' : '#777' }}>M</button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="text-[8px] w-5" style={{ color: '#666' }}>Vol</span>
+                  <input type="range" min={0} max={1.2} step={0.01} value={track?.gain ?? 0.85} onChange={e => api.setGain(ctxMenu.trackId, Number(e.target.value))} className="flex-1" style={{ accentColor: track?.color ?? '#4f8ef7', height: 3 }} />
+                  <span className="text-[8px] tabular-nums w-6 text-right" style={{ color: '#666' }}>{Math.round((track?.gain ?? 0) * 100)}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[8px] w-5" style={{ color: '#666' }}>Pan</span>
+                  <input type="range" min={-1} max={1} step={0.02} value={track?.pan ?? 0} onChange={e => api.setPan(ctxMenu.trackId, Number(e.target.value))} className="flex-1" style={{ accentColor: track?.color ?? '#4f8ef7', height: 3 }} />
+                  <span className="text-[8px] tabular-nums w-6 text-right" style={{ color: '#666' }}>{track?.pan ? (track.pan > 0 ? `R${Math.round(track.pan * 100)}` : `L${Math.round(-track.pan * 100)}`) : 'C'}</span>
+                </div>
+                <button onClick={() => { openPanel('effects'); setCtxMenu(null) }} className="mt-2 w-full flex items-center justify-center gap-1 py-1 rounded text-[9px] hover:brightness-125" style={{ background: '#2a2a2a', color: '#bbb' }}>
+                  <Activity size={10} /> Mixer &amp; effets
+                </button>
+              </div>
               <button disabled={!canSeparate} onClick={() => { if (canSeparate && workspace && track?.trackId) api.separateStems(workspace.id, track.trackId); setCtxMenu(null) }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-xs" style={item(!canSeparate)} onMouseEnter={hover()} onMouseLeave={out}>
                 <Scissors size={11} /> {t('studio_separate_audio')}

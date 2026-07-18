@@ -66,8 +66,12 @@
   50%       { opacity: 0.6; }
 }
 @keyframes fadeIn {
+  /* NB: the `to` frame must NOT leave a transform — a retained `translateY(0)`
+     (with animation-fill-mode: forwards) still establishes a containing block,
+     which breaks `position: fixed` descendants (context menus / dropdowns get
+     offset by the container). Animate transform only on the `from` frame. */
   from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; }
 }
 @keyframes slideInLeft {
   from { opacity: 0; transform: translateX(-16px); }
