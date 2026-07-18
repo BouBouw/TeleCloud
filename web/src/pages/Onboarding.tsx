@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { wsApi, botApi, trackApi } from '../lib/api'
 import type { Workspace, SCResult } from '../lib/api'
+import { workspaceActions } from '../store/workspaceStore'
 import {
   Volume2, Bot, Music2, CheckCircle2, ArrowRight, Loader2,
   Search, Radio, Zap, X, ChevronRight, Sparkles, Play, Pause,
@@ -197,7 +198,12 @@ export default function Onboarding() {
   }
 
   const goNext  = () => setStep(prev => STEPS[Math.min(IDX[prev] + 1, STEPS.length - 1)])
-  const finish  = () => { markOnboarded(); navigate('/dashboard') }
+  const finish  = () => {
+    markOnboarded()
+    // If a workspace was created, invalidate the store so AppLayout re-fetches and finds it
+    if (ws) { workspaceActions.invalidate(); workspaceActions.init() }
+    navigate('/dashboard')
+  }
   const skipAll = () => { markOnboarded(); navigate('/dashboard') }
 
   const handleWorkspace = async (e: React.FormEvent) => {
@@ -284,15 +290,18 @@ export default function Onboarding() {
               className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-semibold hover:opacity-85 transition-opacity"
               style={btnPrimary}
             >
-              Commencer <ArrowRight size={15} />
+              Configurer mon workspace <ArrowRight size={15} />
             </button>
             <button
               onClick={skipAll}
-              className="mt-3 text-[11px] hover:brightness-125"
-              style={{ color: S.textFade, background: 'transparent', border: 'none', cursor: 'pointer' }}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md text-sm hover:opacity-90 transition-opacity mt-2"
+              style={{ ...btnSecondary, borderColor: S.borderHi }}
             >
-              Passer et aller au dashboard
+              Je rejoins un workspace partagé
             </button>
+            <p className="mt-3 text-[10px] leading-relaxed" style={{ color: S.textFade }}>
+              Si quelqu'un t'invite à son espace, choisis cette option — tu n'as rien à configurer.
+            </p>
           </div>
         </Card>
       </div>

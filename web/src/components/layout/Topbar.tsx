@@ -4,12 +4,15 @@ import {
   Bell, Search, Settings, LogOut,
   ChevronDown, Music2, Bot, Radio, Film,
   ShieldCheck, X, Loader2, Menu,
+  CheckCircle2, AlertCircle, Send, HardDrive, Check,
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useI18n } from '../../i18n'
-import { wsApi, trackApi, botApi, galleryApi } from '../../lib/api'
-import type { Track, Bot as BotType, VideoFile, Workspace } from '../../lib/api'
+import { trackApi, botApi, galleryApi } from '../../lib/api'
+import type { Track, Bot as BotType, VideoFile } from '../../lib/api'
 import { useMobileSidebar } from './AppLayout'
+import { useNotifications, type Notification, type NotifType } from '../../store/notificationsStore'
+import { useWorkspaces } from '../../store/workspaceStore'
 
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
 interface TopbarProps { title?: string; subtitle?: string }
@@ -21,12 +24,23 @@ const S = {
   input: '#0a0a0a', red: '#e74c3c',
 }
 
-const NOTIFICATIONS = [
-  { id: '1', icon: Music2, color: S.accent,  textKey: 'notif_1_text' as const, time: '2m',  unread: true  },
-  { id: '2', icon: Bot,    color: '#67e8f9', textKey: 'notif_2_text' as const, time: '15m', unread: true  },
-  { id: '3', icon: Radio,  color: '#f472b6', textKey: 'notif_3_text' as const, time: '1h',  unread: false },
-  { id: '4', icon: Music2, color: S.accent,  textKey: 'notif_4_text' as const, time: '3h',  unread: false },
-]
+const TYPE_ICON: Record<NotifType, { icon: React.ElementType; color: string }> = {
+  'track:added':     { icon: Music2,       color: '#f0a830' },
+  'track:error':     { icon: AlertCircle,  color: '#e74c3c' },
+  'montage:started': { icon: Loader2,      color: '#67e8f9' },
+  'montage:done':    { icon: CheckCircle2, color: '#4ade80' },
+  'montage:failed':  { icon: AlertCircle,  color: '#e74c3c' },
+  'post:sent':       { icon: Send,         color: '#4ade80' },
+  'post:failed':     { icon: AlertCircle,  color: '#e74c3c' },
+}
+
+function formatRelTime(iso: string): string {
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (diff < 60)   return `${diff}s`
+  if (diff < 3600) return `${Math.floor(diff / 60)}min`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`
+  return `${Math.floor(diff / 86400)}j`
+}
 
 function useDropdown() {
   const [open, setOpen] = useState(false)
@@ -62,16 +76,18 @@ export default function Topbar({ title: _title, subtitle: _subtitle }: TopbarPro
   const searchRef = useRef<HTMLInputElement>(null)
   const searchDropRef = useRef<HTMLDivElement>(null)
   const [searchVal, setSearchVal]   = useState('')
-  const [notifs, setNotifs]         = useState(NOTIFICATIONS)
-  const [ws, setWs]                 = useState<Workspace | null>(null)
   const [searchResults, setSearchResults] = useState<{ tracks: Track[]; bots: BotType[]; videos: VideoFile[] } | null>(null)
   const [searching, setSearching]   = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
 
+  const { workspace: ws, workspaces, setActiveWorkspace } = useWorkspaces()
+  const { notifications, unreadCount, markRead, markAllRead } = useNotifications()
+
   const bell    = useDropdown()
   const profile = useDropdown()
+  const wsSwitcher = useDropdown()
 
-  const unread = notifs.filter(n => n.unread).length
+  const unread = unreadCount
 
   const handleKeydown = useCallback((e: KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); searchRef.current?.focus() }
@@ -81,11 +97,6 @@ export default function Topbar({ title: _title, subtitle: _subtitle }: TopbarPro
     document.addEventListener('keydown', handleKeydown)
     return () => document.removeEventListener('keydown', handleKeydown)
   }, [handleKeydown])
-
-  // Load workspace
-  useEffect(() => {
-    wsApi.list().then(d => { if (d.workspaces.length) setWs(d.workspaces[0]) }).catch(() => {})
-  }, [])
 
   // Debounced search across tracks / bots / gallery
   useEffect(() => {
@@ -321,6 +332,42 @@ export default function Topbar({ title: _title, subtitle: _subtitle }: TopbarPro
         )}
       </div>
 
+      {/* Workspace switcher (only shown when member of multiple workspaces) */}
+      {workspaces.length > 1 && (
+        <div ref={wsSwitcher.ref} className="relative hidden md:block ml-3">
+          <button
+            onClick={() => wsSwitcher.setOpen(o => !o)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded transition-colors"
+            style={{ color: S.textDim, background: 'transparent', border: `1px solid ${S.border}`, cursor: 'pointer', fontSize: 11 }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = S.borderHi; (e.currentTarget as HTMLElement).style.color = S.text }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = S.border; (e.currentTarget as HTMLElement).style.color = S.textDim }}
+          >
+            <HardDrive size={11} style={{ color: S.accent, flexShrink: 0 }} />
+            <span className="max-w-[120px] truncate" style={{ color: S.text }}>{ws?.name ?? '…'}</span>
+            <ChevronDown size={10} style={{ color: S.textMute, transform: wsSwitcher.open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} />
+          </button>
+          {wsSwitcher.open && (
+            <DropMenu style={{ minWidth: 180, left: 0, right: 'auto' }}>
+              <div className="px-3 py-2 text-[9px] font-semibold uppercase tracking-widest" style={{ color: S.textFade, borderBottom: `1px solid ${S.border}` }}>Espace de travail</div>
+              {workspaces.map(w => (
+                <button
+                  key={w.id}
+                  onClick={() => { setActiveWorkspace(w.id); wsSwitcher.setOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-left"
+                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: w.id === ws?.id ? S.text : S.textDim }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = S.hover }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+                >
+                  <HardDrive size={11} style={{ color: w.id === ws?.id ? S.accent : S.textMute, flexShrink: 0 }} />
+                  <span className="flex-1 truncate">{w.name}</span>
+                  {w.id === ws?.id && <Check size={10} style={{ color: S.accent, flexShrink: 0 }} />}
+                </button>
+              ))}
+            </DropMenu>
+          )}
+        </div>
+      )}
+
       {/* Right — icons */}
       <div className="flex items-center gap-1 ml-auto">
 
@@ -351,7 +398,7 @@ export default function Topbar({ title: _title, subtitle: _subtitle }: TopbarPro
                 <span className="text-xs font-semibold" style={{ color: S.text }}>{t('notifications_heading')}</span>
                 {unread > 0 && (
                   <button
-                    onClick={() => setNotifs(n => n.map(x => ({ ...x, unread: false })))}
+                    onClick={() => markAllRead()}
                     className="text-[10px] hover:brightness-125"
                     style={{ color: S.accent, background: 'transparent', border: 'none', cursor: 'pointer' }}
                   >
@@ -360,23 +407,37 @@ export default function Topbar({ title: _title, subtitle: _subtitle }: TopbarPro
                 )}
               </div>
               <div className="max-h-64 overflow-y-auto">
-                {notifs.map(({ id, icon: Icon, color, textKey, time, unread: u }) => (
-                  <div
-                    key={id}
-                    className="flex items-start gap-3 px-4 py-2.5 cursor-pointer transition-colors"
-                    style={{ background: u ? `${S.accent}08` : 'transparent' }}
-                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = S.hover }}
-                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = u ? `${S.accent}08` : 'transparent' }}
-                    onClick={() => setNotifs(n => n.map(x => x.id === id ? { ...x, unread: false } : x))}
-                  >
-                    <Icon size={13} style={{ color, marginTop: 1, flexShrink: 0 }} />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[11px] leading-snug" style={{ color: S.text }}>{t(textKey)}</p>
-                      <p className="text-[10px] mt-0.5" style={{ color: S.textFade }}>{time}</p>
-                    </div>
-                    {u && <span className="rounded-full mt-1.5 shrink-0" style={{ width: 5, height: 5, background: S.accent, display: 'block' }} />}
+                {notifications.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 gap-2">
+                    <Bell size={20} style={{ color: S.textFade }} />
+                    <p className="text-xs" style={{ color: S.textMute }}>Aucune notification</p>
                   </div>
-                ))}
+                ) : notifications.map((n: Notification) => {
+                  const meta = TYPE_ICON[n.type] ?? { icon: Radio, color: S.accent }
+                  const Icon = meta.icon
+                  const relTime = formatRelTime(n.createdAt)
+                  return (
+                    <div
+                      key={n.id}
+                      className="flex items-start gap-3 px-4 py-2.5 cursor-pointer transition-colors"
+                      style={{ background: n.unread ? `${S.accent}08` : 'transparent' }}
+                      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = S.hover }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = n.unread ? `${S.accent}08` : 'transparent' }}
+                      onClick={() => {
+                        markRead([n.id])
+                        if (n.link) { navigate(n.link); bell.setOpen(false) }
+                      }}
+                    >
+                      <Icon size={13} style={{ color: meta.color, marginTop: 1, flexShrink: 0 }} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] font-semibold leading-snug" style={{ color: S.text }}>{n.title}</p>
+                        <p className="text-[10px] leading-snug mt-0.5" style={{ color: S.textDim }}>{n.body}</p>
+                        <p className="text-[10px] mt-0.5" style={{ color: S.textFade }}>{relTime}</p>
+                      </div>
+                      {n.unread && <span className="rounded-full mt-1.5 shrink-0" style={{ width: 5, height: 5, background: S.accent, display: 'block' }} />}
+                    </div>
+                  )
+                })}
               </div>
             </DropMenu>
           )}

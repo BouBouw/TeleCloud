@@ -1,0 +1,14 @@
+name              = "instagram-relay"
+main              = "worker.js"
+compatibility_date = "2024-12-01"
+
+# ── Deploy ──────────────────────────────────────────────────────────────────
+# 1. Install Wrangler:   npm i -g wrangler
+# 2. Login:             wrangler login
+# 3. Deploy:            wrangler deploy
+# 4. Set secret:        wrangler secret put RELAY_SECRET
+#    (enter a strong random string, e.g. openssl rand -hex 32)
+#
+# Then on the VPS add to /var/www/vibot/server/.env:
+#   INSTAGRAM_CF_WORKER_URL=https://instagram-relay.<subdomain>.workers.dev
+#   INSTAGRAM_CF_WORKER_SECRET=<same secret>

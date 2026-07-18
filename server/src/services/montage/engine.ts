@@ -42,6 +42,9 @@ export async function runMontageEngine(projectId: string, log: LogFn): Promise<s
   const audioOffset = durationMode !== 'FULL_SONG'
     ? findBestAudioSegment(beatInfo, targetDuration)
     : 0
+  // targetDuration is now stable: the snap fix ensures audioOffset never overshoots.
+  // Pass it explicitly to composeTimeline so it doesn't re-derive it from the
+  // truncated bi.duration (beatInfo.duration - offset) which could be < targetDuration.
 
   if (audioOffset > 0) {
     await log('ANALYSING_AUDIO', 12, `Best segment starts at ${audioOffset.toFixed(1)}s`)
@@ -84,6 +87,7 @@ export async function runMontageEngine(projectId: string, log: LogFn): Promise<s
     project.style as ProjectStyle,
     project.durationMode as DurationMode,
     audioOffset,
+    targetDuration,
   )
   await log('COMPOSING_TIMELINE', 55, `Timeline: ${timeline.length} clips, ${timeline.reduce((s, e) => s + e.outputDuration, 0).toFixed(1)}s`)
 

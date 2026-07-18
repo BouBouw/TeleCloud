@@ -1,6 +1,6 @@
 ﻿import type { Translations } from '../types'
 export const en: Translations = {
-  logo_brand:'Vibot',nav_dashboard:'Dashboard',nav_library:'Library',nav_gallery:'Gallery',nav_studio:'Studio',nav_montage:'Montage',nav_channels:'Channels',
+  logo_brand:'Vibot',nav_dashboard:'Dashboard',nav_library:'Library',nav_gallery:'Gallery',nav_studio:'Studio',nav_montage:'Montage',nav_channels:'Channels',nav_members:'Members',
   role_admin:'Admin',role_user:'User',
   search_placeholder:'Search…',notifications_heading:'Notifications',notifications_mark_all_read:'Mark all read',
   notif_1_text:'Track scraped successfully',notif_2_text:'MusicBot Alpha is online',notif_3_text:'Broadcast sent @synthwave_ch',notif_4_text:'12 new tracks in Library',
@@ -61,7 +61,7 @@ export const en: Translations = {
   no_results_hint:'No results. Try a different term.',search_empty_hint:'Type something to search.',
   done_heading:"You're all set!",done_desc:'Your workspace is ready. Head to the dashboard to start broadcasting your music on Telegram.',
   status_created:'Created',status_skipped:'Skipped',status_deployed:'Deployed',status_imported:'Imported',btn_go_dashboard:'Go to Dashboard',
-  page_title_settings:'Settings',nav_appearance:'Appearance',nav_language:'Language',nav_preferences:'Preferences',nav_accounts:'Connected accounts',nav_subscription:'Subscription',
+  page_title_settings:'Settings',nav_appearance:'Appearance',nav_language:'Language',nav_preferences:'Preferences',nav_accounts:'Connected accounts',nav_subscription:'Subscription',nav_account:'Account',
   section_appearance:'Appearance',row_theme:'Theme',row_theme_desc:'Interface colors',theme_dark:'Dark',theme_light:'Light',
   badge_soon:'Soon',row_reduced_motion:'Reduce animations',row_reduced_motion_desc:'Disable interface transitions',
   section_language_region:'Language & Region',row_interface_lang:'Interface language',row_interface_lang_desc:'Language displayed in the app',
@@ -106,4 +106,8 @@ export const en: Translations = {
   results_count:'{N} results',platform_coming_soon:'Soon',
   search_cat_tracks:'Tracks',search_cat_bots:'Bots',search_cat_videos:'Videos',search_no_results:'No results',
   sc_search_placeholder:'Search title, artist or paste SoundCloud link',sc_load_more:'Show more',sc_already_in_lib:'{title} already in library',sc_added_success:'{title} added!',social_mode_choose:'Choose',step2_url_sub:'Direct link to content',step2_username_sub:'Profile @{username} on {platform}',ct_tiktok_videos_desc:'Latest public videos',ct_tiktok_stories_desc:'TikTok stories (if public)',ct_instagram_posts_desc:'Profile posts',ct_instagram_reels_desc:'Profile reels',ct_instagram_stories_desc:'Stories (requires auth)',ct_x_videos_desc:'Tweets with videos',ct_x_posts_desc:'All media tweets',ct_snapchat_stories_desc:'Current public stories',ct_snapchat_highlights_desc:'Pinned stories',
+  studio_separate_audio:"Separate audio",studio_load_main:"Load as main track",studio_reset_track:"Reset track",studio_delete_track:"Delete track",
+  studio_record:"Record from mic",studio_stop_record:"Stop recording",studio_undo:"Undo",studio_redo:"Redo",studio_fade_in:"Fade in",studio_fade_out:"Fade out",
+  studio_silence:"Silence",studio_normalize:"Normalize",studio_reverse:"Reverse",studio_split:"Split at playhead",studio_trim:"Trim to selection",
+  shortcut_undo:"Undo / Redo",shortcut_split:"Split at playhead",shortcut_record:"Record",
 }

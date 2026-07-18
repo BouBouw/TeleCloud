@@ -7,6 +7,7 @@ import path from 'path'
 import prisma from '../../lib/prisma'
 import logger from '../../lib/logger'
 import { publishVideo } from './publisher'
+import * as notifs from '../notifications'
 
 const STORAGE_ROOT = path.resolve(process.env.STORAGE_PATH ?? './storage')
 
@@ -75,12 +76,25 @@ async function runScheduledPosts(): Promise<void> {
             publishedUrl: result.url ?? null,
           },
         })
+        // Notify workspace
+        const proj = await prisma.montageProject.findUnique({ where: { id: post.projectId }, select: { workspaceId: true, title: true } })
+        if (proj) notifs.push(proj.workspaceId, 'post:sent',
+          `Post ${post.platform} publié ✓`,
+          `« ${proj.title} » publié sur ${post.platform}${result.url ? ` \u2192 ${result.url}` : ''}.`,
+          `/montage/${post.projectId}`
+        )
         logger.info(`[scheduler] Posted project ${post.projectId} to ${post.platform}: ${result.postId}`)
       } catch (err: any) {
         await prisma.socialPost.update({
           where: { id: post.id },
           data: { status: 'FAILED', error: err.message },
         })
+        const proj = await prisma.montageProject.findUnique({ where: { id: post.projectId }, select: { workspaceId: true, title: true } })
+        if (proj) notifs.push(proj.workspaceId, 'post:failed',
+          `Post ${post.platform} échoué`,
+          `« ${proj.title} » : ${String(err.message).slice(0, 80)}`,
+          `/montage/${post.projectId}`
+        )
         logger.error(`[scheduler] Failed to post ${post.id} to ${post.platform}: ${err.message}`)
       }
     }

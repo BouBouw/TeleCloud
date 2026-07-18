@@ -56,7 +56,8 @@ export async function publishToTikTok(opts: PublishOptions): Promise<PublishResu
     body: JSON.stringify({
       post_info: {
         title:                    text,
-        privacy_level:            'PUBLIC_TO_EVERYONE',
+        // SELF_ONLY required for sandbox/unaudited apps; set TIKTOK_PRIVACY_LEVEL=PUBLIC_TO_EVERYONE after app review
+        privacy_level:            (process.env.TIKTOK_PRIVACY_LEVEL ?? 'SELF_ONLY') as string,
         disable_duet:             false,
         disable_comment:          false,
         disable_stitch:           false,

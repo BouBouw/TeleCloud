@@ -81,7 +81,7 @@ export default function SoundCloudSearch({ workspaceId, onScrapeSuccess, library
     [libraryTracks]
   )
 
-  const isSCUrl = (v: string) => v.includes('soundcloud.com/')
+  const isSCUrl = (v: string) => /soundcloud\.com\//i.test(v)
 
   const doSearch = async (value: string) => {
     if (!value.trim()) { setResults([]); setNextOffset(null); setCurrentQ(''); return }

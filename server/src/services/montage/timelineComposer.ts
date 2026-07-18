@@ -112,13 +112,17 @@ export function composeTimeline(
   style: ProjectStyle,
   durationMode: DurationMode,
   audioOffset = 0,
+  // Explicit target duration from engine — avoids re-deriving from the shifted
+  // beatInfo.duration (which is audioDuration - offset and may be < the target
+  // when the snap-to-beat moved the offset right up against the window boundary).
+  forcedTargetDuration?: number,
 ): TimelineEntry[] {
   if (clips.length === 0) return []
 
   const sc = STYLE_CONFIGS[style]
   // Shift beat/section times to be 0-based relative to audioOffset
   const bi = audioOffset > 0 ? shiftBeatInfo(beatInfo, audioOffset) : beatInfo
-  const targetDuration = resolveTargetDuration(durationMode, bi.duration)
+  const targetDuration = forcedTargetDuration ?? resolveTargetDuration(durationMode, bi.duration)
   const cutPoints = buildCutPoints(bi, sc, targetDuration, style)
 
   const filtered = clips.filter(

@@ -1,0 +1,13 @@
+{
+  "name": "Vibot — Diffusion musicale Telegram",
+  "short_name": "Vibot",
+  "description": "Gérez votre bibliothèque musicale et diffusez sur Telegram.",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#f0a830",
+  "background_color": "#111111",
+  "icons": [
+    { "src": "/android-chrome-192x192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/android-chrome-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

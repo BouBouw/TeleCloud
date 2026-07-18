@@ -46,6 +46,12 @@ export const authApi = {
   me:       () => request<{ user: User }>('/auth/me'),
   logout:   (refreshToken?: string) =>
     request('/auth/logout', { method: 'POST', body: JSON.stringify({ refreshToken }) }),
+  deactivate: (password: string) =>
+    request('/auth/account/deactivate', { method: 'POST', body: JSON.stringify({ password }) }),
+  reactivate: (email: string, password: string) =>
+    request<{ user: User; accessToken: string; refreshToken: string }>('/auth/account/reactivate', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  deleteAccount: (password: string) =>
+    request('/auth/account', { method: 'DELETE', body: JSON.stringify({ password, confirmation: 'SUPPRIMER' }) }),
 }
 
 // ── Workspaces ────────────────────────────────────────────────────────────────
@@ -77,7 +83,7 @@ export const trackApi = {
       body: JSON.stringify({ soundcloudUrl }),
     }),
   scrapeSocial: (wsId: string, url: string, outputFormat: 'MP3' | 'MP4' = 'MP3') =>
-    request<{ track?: Track; video?: VideoFile; alreadyExists?: boolean }>(`/workspaces/${wsId}/tracks/scrape-social`, {
+    request<{ track?: Track; video?: VideoFile; alreadyExists?: boolean; status?: 'queued'; jobId?: string; meta?: { title: string; thumbnail?: string } }>(`/workspaces/${wsId}/tracks/scrape-social`, {
       method: 'POST',
       body: JSON.stringify({ url, outputFormat }),
     }),
@@ -109,11 +115,26 @@ export const trackApi = {
     if (token) params.set('token', token)
     return `/api/workspaces/${wsId}/tracks/stream-preview?${params}`
   },
-  sendViaTelegram: (wsId: string, trackIds: string[], botId: string) =>
+  sendViaTelegram: (wsId: string, trackIds: string[], botId: string, opts?: { message?: string; groupFiles?: boolean }) =>
     request<{ results: { trackId: string; ok: boolean; error?: string }[] }>(
       `/workspaces/${wsId}/tracks/send`,
-      { method: 'POST', body: JSON.stringify({ trackIds, botId }) },
+      { method: 'POST', body: JSON.stringify({ trackIds, botId, message: opts?.message, groupFiles: opts?.groupFiles }) },
     ),
+  importFromWorkspace: (toWsId: string, fromWorkspaceId: string, trackIds: string[]) =>
+    request<{ imported: object[]; count: number }>(
+      `/workspaces/${toWsId}/tracks/import`,
+      { method: 'POST', body: JSON.stringify({ fromWorkspaceId, trackIds }) },
+    ),
+  syncTelegram: (wsId: string, botId: string) =>
+    request<{ imported: number; skipped: number; tracks: Track[] }>(
+      `/workspaces/${wsId}/tracks/sync-telegram`,
+      { method: 'POST', body: JSON.stringify({ botId }) },
+    ),
+  /** Returns an EventSource URL for the full MTProto sync (SSE stream). */
+  syncTelegramFullUrl: (wsId: string, botId: string): string => {
+    const token = getToken() ?? ''
+    return `/api/workspaces/${wsId}/tracks/sync-telegram-full?botId=${encodeURIComponent(botId)}&token=${encodeURIComponent(token)}`
+  },
   uploadArtwork: async (wsId: string, trackId: string, file: File): Promise<{ artworkUrl: string }> => {
     const token = getToken()
     const formData = new FormData()
@@ -135,6 +156,8 @@ export const trackApi = {
     }
     return res.json()
   },
+  recentArtworks: (wsId: string) =>
+    request<{ artworkUrls: string[] }>(`/workspaces/${wsId}/tracks/recent-artworks`),
   uploadTrack: async (wsId: string, file: File): Promise<{ track: Track }> => {
     const token = getToken()
     const formData = new FormData()
@@ -173,6 +196,11 @@ export const botApi = {
     }),
   logs:   (wsId: string, botId: string) =>
     request<{ logs: string }>(`/workspaces/${wsId}/bots/${botId}/logs`),
+  update: (wsId: string, botId: string, data: { channelId?: string; reaction?: string | null; telegramToken?: string }) =>
+    request<{ bot: Bot }>(`/workspaces/${wsId}/bots/${botId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
   delete: (wsId: string, botId: string) =>
     request(`/workspaces/${wsId}/bots/${botId}`, { method: 'DELETE' }),
 }
@@ -207,7 +235,7 @@ export interface User {
   id: string; email: string; displayName: string; globalRole: string
 }
 export interface Workspace {
-  id: string; name: string; slug: string; ownerId: string; myRole?: string
+  id: string; name: string; slug: string; ownerId: string; myRole?: string; myLibSend?: boolean
   _count?: { tracks: number; bots: number; members: number }
 }
 export interface Track {
@@ -215,6 +243,7 @@ export interface Track {
   featuring?: string; album?: string
   duration?: number; fileSize?: number; format: string; filePath: string
   artworkUrl?: string; soundcloudUrl?: string; playCount: number; createdAt: string
+  sent?: boolean
 }
 export interface SCResult {
   id: string; title: string; artist: string; artworkUrl?: string
@@ -235,7 +264,41 @@ export interface VideoFile {
 export interface Bot {
   id: string; workspaceId: string; name: string; telegramToken: string
   channelId: string; containerId?: string; status: string
-  broadcastCount: number; createdAt: string
+  broadcastCount: number; reaction?: string | null; createdAt: string
+}
+export interface MemberUser {
+  id: string; email: string; displayName: string
+}
+export type AllPermKey =
+  | 'canLibrary' | 'canStudio' | 'canMontage' | 'canChannels'
+  | 'libRead' | 'libWrite' | 'libDelete' | 'libSend'
+  | 'montageView' | 'montageEdit' | 'montageDelete'
+  | 'chanView' | 'chanManage' | 'chanDelete'
+export interface WorkspaceMember {
+  id: string; workspaceId: string; userId: string; role: string
+  canLibrary: boolean; canStudio: boolean; canMontage: boolean; canChannels: boolean
+  libRead: boolean; libWrite: boolean; libDelete: boolean; libSend: boolean
+  montageView: boolean; montageEdit: boolean; montageDelete: boolean
+  chanView: boolean; chanManage: boolean; chanDelete: boolean
+  joinedAt: string; user: MemberUser
+}
+
+// ── Members ───────────────────────────────────────────────────────────────────
+export const memberApi = {
+  list: (wsId: string) =>
+    request<{ members: WorkspaceMember[] }>(`/workspaces/${wsId}/members`),
+  add: (wsId: string, email: string, perms: Partial<Record<AllPermKey, boolean>>) =>
+    request<{ member: WorkspaceMember }>(`/workspaces/${wsId}/members`, {
+      method: 'POST', body: JSON.stringify({ email, ...perms }),
+    }),
+  updatePerms: (wsId: string, memberId: string, perms: Partial<Record<AllPermKey, boolean>>) =>
+    request<{ member: WorkspaceMember }>(`/workspaces/${wsId}/members/${memberId}`, {
+      method: 'PATCH', body: JSON.stringify(perms),
+    }),
+  remove: (wsId: string, memberId: string) =>
+    request(`/workspaces/${wsId}/members/${memberId}`, { method: 'DELETE' }),
+  searchUsers: (wsId: string, q: string) =>
+    request<{ users: MemberUser[] }>(`/workspaces/${wsId}/users/search?q=${encodeURIComponent(q)}`),
 }
 
 // ── Montage ───────────────────────────────────────────────────────────────────
@@ -301,11 +364,13 @@ export const montageApi = {
     request<{ project: MontageProject }>(`/workspaces/${wsId}/montage`, { method: 'POST', body: JSON.stringify(data) }),
   get:         (wsId: string, id: string) => request<{ project: MontageProject }>(`/workspaces/${wsId}/montage/${id}`),
   delete:      (wsId: string, id: string) => request(`/workspaces/${wsId}/montage/${id}`, { method: 'DELETE' }),
-  patch:       (wsId: string, id: string, data: Partial<{ title: string; style: MontageStyle; durationMode: MontageDuration; ratio: MontageRatio }>) =>
+  patch:       (wsId: string, id: string, data: Partial<{ title: string; style: MontageStyle; durationMode: MontageDuration; ratio: MontageRatio; audioPath: null }>) =>
     request<{ project: MontageProject }>(`/workspaces/${wsId}/montage/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   uploadAudio: (wsId: string, id: string, file: File) => uploadFile<{ project: MontageProject }>(`/workspaces/${wsId}/montage/${id}/audio`, 'audio', file),
   audioFromTrack: (wsId: string, id: string, trackId: string) =>
     request<{ project: MontageProject }>(`/workspaces/${wsId}/montage/${id}/audio-from-track`, { method: 'POST', body: JSON.stringify({ trackId }) }),
+  audioFromVideo: (wsId: string, id: string, sourceVideoId: string, audioTrackIndex = 0) =>
+    request<{ project: MontageProject }>(`/workspaces/${wsId}/montage/${id}/audio-from-video`, { method: 'POST', body: JSON.stringify({ sourceVideoId, audioTrackIndex }) }),
   addVideoUrl: (wsId: string, id: string, url: string) =>
     request<{ sourceVideo: MontageSourceVideo; downloading: boolean }>(`/workspaces/${wsId}/montage/${id}/video-url`, { method: 'POST', body: JSON.stringify({ url }) }),
   uploadVideo: (wsId: string, id: string, file: File) => uploadFile<{ sourceVideo: MontageSourceVideo }>(`/workspaces/${wsId}/montage/${id}/video-upload`, 'video', file),
@@ -348,6 +413,8 @@ export const montageApi = {
     request<{ clips: MontageClip[] }>(`/workspaces/${wsId}/montage/${id}/clips`),
   updateClips: (wsId: string, id: string, clips: Array<{ id: string; position?: number; transition?: string }>) =>
     request(`/workspaces/${wsId}/montage/${id}/clips`, { method: 'PATCH', body: JSON.stringify({ clips }) }),
+  addClip: (wsId: string, id: string, sourceVideoId: string, clipStart: number, clipEnd: number) =>
+    request<{ clip: MontageClip }>(`/workspaces/${wsId}/montage/${id}/clips`, { method: 'POST', body: JSON.stringify({ sourceVideoId, clipStart, clipEnd }) }),
   deleteClip: (wsId: string, id: string, clipId: string) =>
     request(`/workspaces/${wsId}/montage/${id}/clips/${clipId}`, { method: 'DELETE' }),
   getBeatData: (wsId: string, id: string) =>
@@ -389,6 +456,8 @@ export interface SocialPost {
 export const socialApi = {
   listAccounts: (wsId: string) =>
     request<{ accounts: SocialAccount[] }>(`/workspaces/${wsId}/social/accounts`),
+  tiktokAuthUrl: (wsId: string) =>
+    request<{ url: string }>(`/workspaces/${wsId}/social/tiktok/auth`),
   connect: (wsId: string, platform: string, data: {
     accountName: string; accountLabel?: string
     accessToken: string; refreshToken?: string; accountId?: string
@@ -423,4 +492,62 @@ export const adminApi = {
       method: 'PATCH',
       body: JSON.stringify({ globalRole }),
     }),
+  getYouTubeCookies: () => request<{ configured: boolean; path: string; lines: number; mtime?: string }>('/admin/youtube-cookies'),
+  saveYouTubeCookies: (cookies: string) =>
+    request<{ ok: boolean; lines: number }>('/admin/youtube-cookies', {
+      method: 'POST',
+      body: JSON.stringify({ cookies }),
+    }),
+  deleteYouTubeCookies: () => request<{ ok: boolean }>('/admin/youtube-cookies', { method: 'DELETE' }),
+}
+
+// ── Tunnel ────────────────────────────────────────────────────────────────────
+export interface TunnelJobStatus {
+  id:           string
+  status:       'pending' | 'running' | 'done' | 'failed'
+  outputFormat: 'MP3' | 'MP4'
+  meta:         { ytId: string; title: string; thumbnail?: string; duration?: number }
+  error?:       string
+  result?:      { trackId?: string; videoId?: string; title: string }
+  updatedAt:    string
+}
+
+export const tunnelApi = {
+  status: () => request<{ active: boolean; lastSeenMs: number }>('/tunnel/status'),
+  pollJob: (jobId: string) => request<{ job: TunnelJobStatus }>(`/tunnel/jobs/${jobId}`),
+}
+
+// ── Converter ─────────────────────────────────────────────────────────────────
+export interface ConversionJob {
+  id: string; workspaceId: string
+  inputName: string; inputFormat: string; outputFormat: string
+  outputPath?: string; status: 'processing' | 'done' | 'error'
+  errorMsg?: string; fileSize?: number; createdAt: string
+}
+
+export const convertApi = {
+  convert: async (wsId: string, file: File, outputFormat: string): Promise<{ job: ConversionJob }> => {
+    const token = getToken()
+    const form  = new FormData()
+    form.append('file', file)
+    form.append('outputFormat', outputFormat)
+    const res = await fetch(`${BASE}/workspaces/${wsId}/convert`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    })
+    if (res.status === 401) { localStorage.removeItem('ss_token'); window.location.replace('/login'); throw new Error('Session expired') }
+    if (!res.ok) { const b = await res.json().catch(() => ({ error: res.statusText })); throw new Error(b.error ?? `HTTP ${res.status}`) }
+    return res.json()
+  },
+  history: (wsId: string) =>
+    request<{ jobs: ConversionJob[] }>(`/workspaces/${wsId}/convert`),
+  status: (wsId: string, jobId: string) =>
+    request<{ job: ConversionJob }>(`/workspaces/${wsId}/convert/${jobId}`),
+  downloadUrl: (wsId: string, jobId: string): string => {
+    const token = getToken()
+    return `/api/workspaces/${wsId}/convert/${jobId}/download${token ? `?token=${encodeURIComponent(token)}` : ''}`
+  },
+  delete: (wsId: string, jobId: string) =>
+    request(`/workspaces/${wsId}/convert/${jobId}`, { method: 'DELETE' }),
 }

@@ -12,11 +12,15 @@ import Admin from "./pages/Admin"
 import Onboarding from "./pages/Onboarding"
 import Settings from "./pages/Settings"
 
+import Members from "./pages/Members"
+import TiktokCallback from "./pages/TiktokCallback"
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login"      element={<Login />} />
       <Route path="/onboarding" element={<Onboarding />} />
+      <Route path="/auth/redirect" element={<TiktokCallback />} />
       <Route element={<AppLayout />}>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/library"   element={<Library />} />
@@ -25,6 +29,7 @@ export default function App() {
         <Route path="/montage"   element={<Montage />} />
         <Route path="/montage/:id" element={<MontageEditor />} />
         <Route path="/channels"  element={<Channels />} />
+        <Route path="/members"   element={<Members />} />
         <Route path="/admin"     element={<Admin />} />
         <Route path="/settings"  element={<Settings />} />
       </Route>

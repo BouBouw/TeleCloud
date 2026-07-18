@@ -3,7 +3,7 @@ import {
   Palette, Globe, SlidersHorizontal, Link2, CreditCard,
   Check, Sun, Moon, Lock, Zap,
   Plus, Trash2, Pencil, ChevronDown, ChevronRight, Eye, EyeOff,
-  RefreshCw,
+  RefreshCw, UserX, AlertTriangle, ShieldOff,
 } from 'lucide-react'
 import {
   FaTiktok, FaInstagram, FaYoutube, FaXTwitter, FaFacebook,
@@ -12,7 +12,7 @@ import {
 import { useAuth } from '../hooks/useAuth'
 import { useWorkspace } from '../hooks/useWorkspace'
 import { useI18n, LANGUAGES } from '../i18n'
-import { socialApi, type SocialAccount, type SocialPlatform } from '../lib/api'
+import { authApi, socialApi, type SocialAccount, type SocialPlatform } from '../lib/api'
 import type { TranslationKey } from '../i18n/types'
 
 const S = {
@@ -39,6 +39,7 @@ type PlatformInfo = {
   color: string
   bg: string
   description: string
+  useOAuth?: boolean      // use server-side OAuth flow instead of manual token form
   tokenLabel: string      // label for the access token field
   tokenPlaceholder: string
   tokenHint: string
@@ -53,11 +54,10 @@ const PLATFORM_LIST: PlatformInfo[] = [
     color: '#69C9D0',
     bg: 'rgba(105,201,208,0.12)',
     description: 'Publie des vidéos courtes sur TikTok.',
+    useOAuth: true,
     tokenLabel: 'OAuth Access Token',
-    tokenPlaceholder: 'act.XXXXXXXX... — token OAuth TikTok Content Posting API',
-    tokenHint: 'Inscription sur developers.tiktok.com → créer une app → activer Content Posting API → OAuth 2.0 → scopes : video.upload, video.publish. Le token commence généralement par "act." ou "att.".',
-    refreshLabel: 'Refresh Token (optionnel)',
-    refreshPlaceholder: 'rft.XXXXXXXX... — pour renouvellement auto',
+    tokenPlaceholder: '',
+    tokenHint: '',
   },
   {
     id: 'INSTAGRAM',
@@ -143,7 +143,7 @@ const PLATFORM_LIST: PlatformInfo[] = [
   },
 ]
 
-type Section = 'apparence' | 'langue' | 'preferences' | 'comptes' | 'abonnement'
+type Section = 'apparence' | 'langue' | 'preferences' | 'comptes' | 'abonnement' | 'compte'
 
 const SECTIONS: { id: Section; key: TranslationKey; icon: React.ComponentType<{ size?: number; style?: React.CSSProperties }> }[] = [
   { id: 'apparence',   key: 'nav_appearance',   icon: Palette           },
@@ -151,6 +151,7 @@ const SECTIONS: { id: Section; key: TranslationKey; icon: React.ComponentType<{ 
   { id: 'preferences', key: 'nav_preferences',  icon: SlidersHorizontal },
   { id: 'comptes',     key: 'nav_accounts',     icon: Link2             },
   { id: 'abonnement',  key: 'nav_subscription', icon: CreditCard        },
+  { id: 'compte',      key: 'nav_account',      icon: UserX             },
 ]
 
 /* ── Reusable row ── */
@@ -391,10 +392,22 @@ function PlatformSection({
   onRefresh: () => void
   wsId: string
 }) {
-  const [open,       setOpen]       = useState(accounts.length > 0)
-  const [showForm,   setShowForm]   = useState(false)
-  const [editId,     setEditId]     = useState<string | null>(null)
-  const [deleting,   setDeleting]   = useState<string | null>(null)
+  const [open,         setOpen]       = useState(accounts.length > 0)
+  const [showForm,     setShowForm]   = useState(false)
+  const [editId,       setEditId]     = useState<string | null>(null)
+  const [deleting,     setDeleting]   = useState<string | null>(null)
+  const [oauthLoading, setOAuthLoading] = useState(false)
+
+  const handleOAuthConnect = useCallback(async () => {
+    setOAuthLoading(true)
+    try {
+      const { url } = await socialApi.tiktokAuthUrl(wsId)
+      window.location.href = url
+    } catch (e: unknown) {
+      alert((e as Error).message)
+      setOAuthLoading(false)
+    }
+  }, [wsId])
 
   const handleConnect = useCallback(async (data: {
     accountName: string; accountLabel: string; accessToken: string; refreshToken: string
@@ -484,7 +497,16 @@ function PlatformSection({
           ))}
 
           {/* Add new account */}
-          {showForm ? (
+          {platform.useOAuth ? (
+            <button onClick={handleOAuthConnect} disabled={oauthLoading}
+              className="flex items-center justify-center gap-2 w-full px-3 py-2.5 rounded-lg text-xs font-semibold mt-1 disabled:opacity-50 transition-opacity"
+              style={{ color: platform.color, background: `${platform.color}15`, border: `1px solid ${platform.color}40` }}>
+              {oauthLoading
+                ? <RefreshCw size={12} className="animate-spin" />
+                : <PlatformIcon platform={platform.id} size={12} color={platform.color} />}
+              {oauthLoading ? 'Redirection vers TikTok...' : `Se connecter avec ${platform.label}`}
+            </button>
+          ) : showForm ? (
             <ConnectForm
               platform={platform}
               onSave={handleConnect}
@@ -524,6 +546,19 @@ export default function Settings() {
   const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>([])
   const [loadingAccounts, setLoadingAccounts] = useState(false)
 
+  // Danger zone — deactivate
+  const [showDeactivate,   setShowDeactivate]   = useState(false)
+  const [deactivatePwd,    setDeactivatePwd]    = useState('')
+  const [deactivating,     setDeactivating]     = useState(false)
+  const [deactivateError,  setDeactivateError]  = useState<string | null>(null)
+
+  // Danger zone — delete
+  const [showDelete,    setShowDelete]    = useState(false)
+  const [deletePwd,     setDeletePwd]     = useState('')
+  const [deleteConfirm, setDeleteConfirm] = useState('')
+  const [deleting,      setDeleting]      = useState(false)
+  const [deleteError,   setDeleteError]   = useState<string | null>(null)
+
   const loadAccounts = useCallback(async () => {
     if (!workspace) return
     setLoadingAccounts(true)
@@ -535,6 +570,37 @@ export default function Settings() {
   useEffect(() => {
     if (section === 'comptes') loadAccounts()
   }, [section, loadAccounts])
+
+  const handleDeactivate = async () => {
+    setDeactivateError(null)
+    if (!deactivatePwd) { setDeactivateError('Mot de passe requis'); return }
+    setDeactivating(true)
+    try {
+      await authApi.deactivate(deactivatePwd)
+      localStorage.clear()
+      window.location.href = '/login'
+    } catch (e: unknown) {
+      setDeactivateError((e as Error).message)
+    } finally {
+      setDeactivating(false)
+    }
+  }
+
+  const handleDeleteAccount = async () => {
+    setDeleteError(null)
+    if (!deletePwd) { setDeleteError('Mot de passe requis'); return }
+    if (deleteConfirm !== 'SUPPRIMER') { setDeleteError('Tapez exactement "SUPPRIMER"'); return }
+    setDeleting(true)
+    try {
+      await authApi.deleteAccount(deletePwd)
+      localStorage.clear()
+      window.location.href = '/login'
+    } catch (e: unknown) {
+      setDeleteError((e as Error).message)
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   return (
     <div className="flex flex-col h-full fade-in" style={{ background: S.bg, color: S.text }}>
@@ -836,6 +902,139 @@ export default function Settings() {
                 </div>
 
                 <p className="mt-4 text-[11px]" style={{ color: S.textFade }}>{t('billing_contact_note')}</p>
+              </>
+            )}
+
+            {/* ── COMPTE (danger zone) ── */}
+            {section === 'compte' && (
+              <>
+                <SectionTitle label="Mon compte" />
+
+                {/* Info card */}
+                <div className="mb-6 p-4 rounded-lg" style={{ background: S.panel, border: `1px solid ${S.border}` }}>
+                  <p className="text-[11px] leading-relaxed" style={{ color: S.textDim }}>
+                    Ces actions sont irréversibles ou engendrent la perte d'accès immédiate à votre espace.
+                    Lisez attentivement avant de continuer.
+                  </p>
+                </div>
+
+                {/* ── Désactiver ── */}
+                <div className="mb-4 rounded-lg overflow-hidden" style={{ border: '1px solid rgba(240,168,48,0.3)' }}>
+                  <div className="px-5 py-4" style={{ background: 'rgba(240,168,48,0.05)' }}>
+                    <div className="flex items-start gap-3 mb-1">
+                      <ShieldOff size={16} style={{ color: S.accent, flexShrink: 0, marginTop: 1 }} />
+                      <div>
+                        <p className="text-sm font-semibold" style={{ color: S.accent }}>Désactiver le compte</p>
+                        <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: S.textMute }}>
+                          Met en pause tous vos bots et bibliothèques. Votre compte reste accessible
+                          mais inactif. Vous pourrez le réactiver à tout moment en vous reconnectant.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-5 py-4" style={{ background: '#0e0e0e' }}>
+                    {!showDeactivate ? (
+                      <button
+                        onClick={() => { setShowDeactivate(true); setDeactivateError(null); setDeactivatePwd('') }}
+                        className="flex items-center gap-2 px-4 py-2 rounded text-xs font-semibold"
+                        style={{ background: 'rgba(240,168,48,0.1)', border: '1px solid rgba(240,168,48,0.4)', color: S.accent, cursor: 'pointer' }}>
+                        <ShieldOff size={11} /> Désactiver mon compte
+                      </button>
+                    ) : (
+                      <div className="flex flex-col gap-3">
+                        <p className="text-[10px]" style={{ color: S.textMute }}>
+                          Confirmez votre mot de passe pour désactiver le compte :
+                        </p>
+                        <input
+                          type="password"
+                          value={deactivatePwd}
+                          onChange={e => setDeactivatePwd(e.target.value)}
+                          placeholder="Mot de passe"
+                          className="w-full text-xs px-2.5 py-1.5 rounded outline-none"
+                          style={{ background: S.input, border: `1px solid ${S.border}`, color: S.text }}
+                          onKeyDown={e => e.key === 'Enter' && handleDeactivate()}
+                        />
+                        {deactivateError && <p className="text-[10px]" style={{ color: S.red }}>{deactivateError}</p>}
+                        <div className="flex gap-2">
+                          <button onClick={handleDeactivate} disabled={deactivating}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50"
+                            style={{ background: 'rgba(240,168,48,0.15)', border: '1px solid rgba(240,168,48,0.5)', color: S.accent, cursor: 'pointer' }}>
+                            {deactivating ? <RefreshCw size={10} className="animate-spin" /> : <ShieldOff size={10} />}
+                            Confirmer la désactivation
+                          </button>
+                          <button onClick={() => setShowDeactivate(false)}
+                            className="px-3 py-1.5 rounded text-xs"
+                            style={{ color: S.textMute, border: `1px solid ${S.border}`, cursor: 'pointer' }}>
+                            Annuler
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Supprimer ── */}
+                <div className="rounded-lg overflow-hidden" style={{ border: '1px solid rgba(231,76,60,0.3)' }}>
+                  <div className="px-5 py-4" style={{ background: 'rgba(231,76,60,0.05)' }}>
+                    <div className="flex items-start gap-3 mb-1">
+                      <AlertTriangle size={16} style={{ color: S.red, flexShrink: 0, marginTop: 1 }} />
+                      <div>
+                        <p className="text-sm font-semibold" style={{ color: S.red }}>Supprimer le compte</p>
+                        <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: S.textMute }}>
+                          Supprime définitivement votre compte, tous vos workspaces, bots, pistes,
+                          montages, bibliothèques et comptes sociaux. <strong style={{ color: S.red }}>Action irréversible.</strong>
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-5 py-4" style={{ background: '#0e0e0e' }}>
+                    {!showDelete ? (
+                      <button
+                        onClick={() => { setShowDelete(true); setDeleteError(null); setDeletePwd(''); setDeleteConfirm('') }}
+                        className="flex items-center gap-2 px-4 py-2 rounded text-xs font-semibold"
+                        style={{ background: 'rgba(231,76,60,0.1)', border: '1px solid rgba(231,76,60,0.4)', color: S.red, cursor: 'pointer' }}>
+                        <Trash2 size={11} /> Supprimer mon compte
+                      </button>
+                    ) : (
+                      <div className="flex flex-col gap-3">
+                        <p className="text-[10px] leading-relaxed" style={{ color: S.textMute }}>
+                          Cette action supprimera <strong style={{ color: S.text }}>définitivement</strong> toutes vos données.
+                          Pour confirmer, tapez <code style={{ color: S.red, fontFamily: 'monospace' }}>SUPPRIMER</code> et entrez votre mot de passe.
+                        </p>
+                        <input
+                          type="text"
+                          value={deleteConfirm}
+                          onChange={e => setDeleteConfirm(e.target.value)}
+                          placeholder='Tapez "SUPPRIMER"'
+                          className="w-full text-xs px-2.5 py-1.5 rounded outline-none font-mono"
+                          style={{ background: S.input, border: `1px solid ${deleteConfirm === 'SUPPRIMER' ? S.red : S.border}`, color: S.red }}
+                        />
+                        <input
+                          type="password"
+                          value={deletePwd}
+                          onChange={e => setDeletePwd(e.target.value)}
+                          placeholder="Mot de passe"
+                          className="w-full text-xs px-2.5 py-1.5 rounded outline-none"
+                          style={{ background: S.input, border: `1px solid ${S.border}`, color: S.text }}
+                        />
+                        {deleteError && <p className="text-[10px]" style={{ color: S.red }}>{deleteError}</p>}
+                        <div className="flex gap-2">
+                          <button onClick={handleDeleteAccount} disabled={deleting || deleteConfirm !== 'SUPPRIMER' || !deletePwd}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-40"
+                            style={{ background: 'rgba(231,76,60,0.15)', border: '1px solid rgba(231,76,60,0.5)', color: S.red, cursor: 'pointer' }}>
+                            {deleting ? <RefreshCw size={10} className="animate-spin" /> : <Trash2 size={10} />}
+                            Supprimer définitivement
+                          </button>
+                          <button onClick={() => setShowDelete(false)}
+                            className="px-3 py-1.5 rounded text-xs"
+                            style={{ color: S.textMute, border: `1px solid ${S.border}`, cursor: 'pointer' }}>
+                            Annuler
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </>
             )}
 

@@ -1,9 +1,10 @@
 /**
  * cobalt.tools API integration — fast YouTube / social media downloader
  * Docs: https://github.com/imputnet/cobalt
- * Public endpoint: https://api.cobalt.tools/
  *
- * No API key required. Falls back to yt-dlp if cobalt fails.
+ * Tries community instances first (no auth required), then falls back to
+ * api.cobalt.tools (which requires JWT). If COBALT_API_URL is set in .env,
+ * that instance is tried first.
  */
 
 import fs from 'fs'
@@ -11,7 +12,17 @@ import path from 'path'
 import { pipeline } from 'stream/promises'
 import { Readable } from 'stream'
 
-const COBALT_API = process.env.COBALT_API_URL?.replace(/\/$/, '') ?? 'https://api.cobalt.tools'
+// Community instances that historically don't require auth.
+// The primary api.cobalt.tools instance requires JWT (Turnstile) — skip it.
+const COBALT_INSTANCES: string[] = [
+  ...(process.env.COBALT_API_URL ? [process.env.COBALT_API_URL.replace(/\/$/, '')] : []),
+  'https://cobalt.api.li',
+  'https://cobalt.7tv.app',
+  'https://capi.oak.lgbt',
+  'https://cobalt.synzr.space',
+  // api.cobalt.tools last — requires JWT auth, will fail without it
+  'https://api.cobalt.tools',
+]
 
 type DownloadMode = 'auto' | 'audio' | 'mute'
 type AudioFormat  = 'best' | 'mp3' | 'ogg' | 'wav' | 'opus'
@@ -37,27 +48,47 @@ interface CobaltResponse {
 
 // ── Core request ──────────────────────────────────────────────────────────────
 
+/**
+ * Try each cobalt instance in order. Skip instances that return auth errors.
+ * Throws if all instances fail.
+ */
 async function cobaltRequest(body: CobaltRequest): Promise<CobaltResponse> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 30_000)
-
-  try {
-    const res = await fetch(`${COBALT_API}/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`Cobalt API HTTP ${res.status}: ${text.slice(0, 300)}`)
+  let lastError = ''
+  for (const base of COBALT_INSTANCES) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30_000)
+    try {
+      const res = await fetch(`${base}/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        // Auth errors → skip to next instance
+        if (text.includes('auth.jwt') || text.includes('auth.api_key') || res.status === 401) {
+          lastError = `${base}: auth required (${res.status})`
+          continue
+        }
+        lastError = `${base}: HTTP ${res.status}`
+        continue
+      }
+      const data = await res.json() as CobaltResponse
+      // Auth error in JSON body → skip to next instance
+      if (data.status === 'error' && data.error?.code?.includes('auth')) {
+        lastError = `${base}: ${data.error.code}`
+        continue
+      }
+      return data
+    } catch (e) {
+      lastError = `${base}: ${String(e).slice(0, 80)}`
+      // continue to next instance
+    } finally {
+      clearTimeout(timer)
     }
-
-    return res.json() as Promise<CobaltResponse>
-  } finally {
-    clearTimeout(timer)
   }
+  throw new Error(`All cobalt instances failed. Last error: ${lastError}`)
 }
 
 // ── Stream download URL → file ────────────────────────────────────────────────

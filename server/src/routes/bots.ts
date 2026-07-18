@@ -31,6 +31,15 @@ const createSchema = z.object({
   name: z.string().min(1).max(64),
   telegramToken: z.string().min(20),
   channelId: z.string().min(5),
+  reaction: z.string().nullable().optional(),
+})
+
+const updateSchema = z.object({
+  channelId:     z.string().min(5).optional(),
+  reaction:      z.string().nullable().optional(),
+  telegramToken: z.string().min(20).optional(),
+}).refine(d => d.channelId !== undefined || d.reaction !== undefined || d.telegramToken !== undefined, {
+  message: 'Au moins channelId, reaction ou telegramToken requis',
 })
 
 /* ── GET /api/workspaces/:wsId/bots ── */
@@ -70,10 +79,10 @@ router.post<WsParams>('/', validate(createSchema), async (req, res) => {
   const manager = await assertManagerOrAbove(req.params.wsId, req.user!.userId)
   if (!manager) { res.status(403).json({ error: 'Requires MANAGER or OWNER role' }); return }
 
-  const { name, telegramToken, channelId } = req.body
+  const { name, telegramToken, channelId, reaction } = req.body
   try {
     const bot = await prisma.bot.create({
-      data: { id: uuid(), workspaceId: req.params.wsId, name, telegramToken, channelId, status: 'stopped' },
+      data: { id: uuid(), workspaceId: req.params.wsId, name, telegramToken, channelId, reaction: reaction ?? null, status: 'stopped' },
     })
 
     // Spawn Docker container
@@ -83,6 +92,7 @@ router.post<WsParams>('/', validate(createSchema), async (req, res) => {
         botName: bot.name,
         telegramToken: bot.telegramToken,
         channelId: bot.channelId,
+        reaction: bot.reaction,
         apiUrl: process.env.API_URL ?? `http://host.docker.internal:${process.env.PORT ?? 4000}`,
         workspaceId: req.params.wsId,
       })
@@ -126,6 +136,7 @@ router.post<BotParams>('/:botId/action', async (req, res) => {
         botName: bot.name,
         telegramToken: bot.telegramToken,
         channelId: bot.channelId,
+        reaction: bot.reaction,
         apiUrl: process.env.API_URL ?? `http://host.docker.internal:${process.env.PORT ?? 4000}`,
         workspaceId: req.params.wsId,
       })
@@ -167,6 +178,49 @@ router.get<BotParams>('/:botId/logs', async (req, res) => {
     res.json({ logs })
   } catch {
     res.status(500).json({ error: 'Could not fetch logs' })
+  }
+})
+
+/* ── PATCH /api/workspaces/:wsId/bots/:botId ── */
+router.patch<BotParams>('/:botId', validate(updateSchema), async (req, res) => {
+  const manager = await assertManagerOrAbove(req.params.wsId, req.user!.userId)
+  if (!manager) { res.status(403).json({ error: 'Requires MANAGER or OWNER role' }); return }
+
+  const { channelId, reaction, telegramToken } = req.body as { channelId?: string; reaction?: string | null; telegramToken?: string }
+  try {
+    const bot = await prisma.bot.findFirst({
+      where: { id: req.params.botId, workspaceId: req.params.wsId },
+    })
+    if (!bot) { res.status(404).json({ error: 'Bot not found' }); return }
+
+    const newChannelId = channelId     ?? bot.channelId
+    const newReaction  = reaction !== undefined ? (reaction ?? null) : bot.reaction
+    const newToken     = telegramToken ?? bot.telegramToken
+    await prisma.bot.update({ where: { id: bot.id }, data: { channelId: newChannelId, reaction: newReaction, telegramToken: newToken } })
+
+    // If running, restart container with updated env vars
+    let containerId = bot.containerId
+    let status = bot.status
+    if (bot.containerId) {
+      try {
+        await removeBotContainer(bot.containerId)
+        containerId = await spawnBotContainer({
+          botId: bot.id, botName: bot.name, telegramToken: newToken,
+          channelId: newChannelId, reaction: newReaction,
+          apiUrl: process.env.API_URL ?? `http://host.docker.internal:${process.env.PORT ?? 4000}`,
+          workspaceId: req.params.wsId,
+        })
+        status = 'running'
+        await prisma.bot.update({ where: { id: bot.id }, data: { containerId, status } })
+      } catch (dockerErr) {
+        logger.error('Container restart after update failed', { err: String(dockerErr) })
+      }
+    }
+
+    res.json({ bot: { ...bot, channelId: newChannelId, reaction: newReaction, telegramToken: newToken, containerId, status } })
+  } catch (err) {
+    logger.error('Bot update failed', { err: String(err) })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 

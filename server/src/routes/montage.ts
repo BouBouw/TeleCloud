@@ -15,10 +15,11 @@ import prisma from '../lib/prisma'
 import { authenticate } from '../middleware/auth'
 import { validate } from '../middleware/validate'
 import { montageQueue } from '../services/montage/renderQueue'
-import { getVideoDuration, detectSceneTimestamps } from '../services/montage/sceneProcessor'
+import { getVideoDuration, detectSceneTimestamps, detectCropParams } from '../services/montage/sceneProcessor'
 import type { SubtitleSegment, SubtitleStyle } from '../services/montage/types'
 import { downloadVideoYtdlp } from '../services/ytdlp'
 import { downloadVideoViaCobalt } from '../services/cobalt'
+import * as tunnelQueue from '../services/tunnelQueue'
 
 const router = Router({ mergeParams: true })
 router.use(authenticate)
@@ -209,6 +210,59 @@ router.post('/:id/audio-from-track', async (req, res) => {
   }
 })
 
+// ── POST /api/workspaces/:wsId/montage/:id/audio-from-video ── extract audio from source video ──
+router.post('/:id/audio-from-video', async (req, res) => {
+  const { sourceVideoId, audioTrackIndex = 0 } = req.body as { sourceVideoId: string; audioTrackIndex?: number }
+  if (!sourceVideoId) { res.status(400).json({ error: 'sourceVideoId required' }); return }
+  try {
+    await requireMember(req.params.wsId, req.user!.userId)
+    const sv = await prisma.montageSourceVideo.findFirst({ where: { id: sourceVideoId, projectId: req.params.id } })
+    if (!sv || !sv.localPath) { res.status(404).json({ error: 'Source video not ready' }); return }
+
+    const videoAbs = path.join(STORAGE_ROOT, sv.localPath)
+    if (!fs.existsSync(videoAbs)) { res.status(404).json({ error: 'Video file not found on disk' }); return }
+
+    // Extract audio to m4a in the same montage dir
+    const outFilename = `audio_vid_${sv.id}_${audioTrackIndex}.m4a`
+    const outAbs  = path.join(montageDir(req.params.wsId), outFilename)
+    const outRel  = path.join(req.params.wsId, 'montage', outFilename)
+
+    const FFMPEG_BIN = process.env.FFMPEG_PATH ?? 'ffmpeg'
+    const { spawn } = await import('child_process')
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(FFMPEG_BIN, [
+        '-y', '-i', videoAbs,
+        '-map', `0:a:${audioTrackIndex}`,
+        '-vn', '-c:a', 'aac', '-b:a', '192k',
+        outAbs,
+      ], { stdio: ['ignore', 'ignore', 'pipe'] })
+      let stderr = ''
+      proc.stderr.on('data', (d: Buffer) => (stderr += d.toString()))
+      proc.on('close', code => { if (code === 0) resolve(); else reject(new Error(`FFmpeg exit ${code}: ${stderr.slice(-300)}`)) })
+      proc.on('error', e => reject(e))
+    })
+
+    const FFPROBE = process.env.FFPROBE_PATH ?? 'ffprobe'
+    const audioDuration = await new Promise<number>(resolve => {
+      const proc = spawn(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', outAbs])
+      let out = ''
+      proc.stdout.on('data', (d: Buffer) => (out += d.toString()))
+      proc.on('close', () => resolve(parseFloat(out.trim()) || 0))
+      proc.on('error', () => resolve(0))
+    })
+
+    const project = await prisma.montageProject.update({
+      where: { id: req.params.id },
+      data: { audioPath: outRel, audioDuration },
+      include: { sourceVideos: true, renderJob: true },
+    })
+    res.json({ project })
+  } catch (e: any) {
+    res.status(e.status ?? 500).json({ error: e.message })
+  }
+})
+
 // ── POST /api/workspaces/:wsId/montage/:id/video-url ── add video from URL ─────
 router.post('/:id/video-url', async (req, res) => {
   const { url } = req.body
@@ -225,7 +279,20 @@ router.post('/:id/video-url', async (req, res) => {
     })
     res.json({ sourceVideo: sv, downloading: true })
 
-    // Download in background — try cobalt first (fast, no re-encode), fall back to yt-dlp
+    // If the local tunnel is active and this is a YouTube URL, delegate to it
+    const isYouTube = /youtube\.com|youtu\.be/i.test(url)
+    if (isYouTube && tunnelQueue.isTunnelActive()) {
+      const videoId = url.match(/(?:v=|youtu\.be\/|\bshorts\/|embed\/)([A-Za-z0-9_-]{11})/)?.[1] ?? sv.id
+      tunnelQueue.createJob(
+        req.params.wsId,
+        req.user!.userId,
+        url,
+        'MONTAGE',
+        { ytId: videoId, title: url, webpage_url: url },
+        sv.id,
+      )
+      return // tunnel will update the MontageSourceVideo when done
+    }
     const dir = montageDir(req.params.wsId)
     const filename = `video_${sv.id}.mp4`
     const destPath = path.join(dir, filename)
@@ -431,7 +498,7 @@ router.get('/:id/stream', async (req, res) => {
 router.patch('/:id', async (req, res) => {
   try {
     await requireMember(req.params.wsId, req.user!.userId)
-    const { title, style, durationMode, ratio } = req.body
+    const { title, style, durationMode, ratio, audioPath } = req.body
     const project = await prisma.montageProject.update({
       where: { id: req.params.id },
       data: {
@@ -439,6 +506,7 @@ router.patch('/:id', async (req, res) => {
         ...(style && { style }),
         ...(durationMode && { durationMode }),
         ...(ratio && { ratio }),
+        ...(audioPath === null ? { audioPath: null, audioDuration: null } : {}),
       },
       include: { sourceVideos: true, renderJob: true },
     })
@@ -502,27 +570,44 @@ router.get('/:id/frames', async (req, res) => {
 
       const dur = sv.duration ?? await getVideoDuration(videoAbs)
       const threshold = dur > 300 ? 0.12 : dur < 60 ? 0.20 : 0.15
-      let timestamps = await detectSceneTimestamps(videoAbs, threshold)
-      // If very few scene cuts, supplement with regular intervals
-      if (timestamps.length <= 2) {
-        const step = Math.max(2, Math.floor(dur / 10))
-        timestamps = Array.from({ length: Math.ceil(dur / step) }, (_, i) => i * step)
-      }
-      const deduped = [...new Set(timestamps.map(t => +t.toFixed(2)))].slice(0, 50)
+
+      // Run scene detection + black-bar detection in parallel
+      const [deduped, cropFilter] = await Promise.all([
+        (async () => {
+          let timestamps = await detectSceneTimestamps(videoAbs, threshold)
+          if (timestamps.length <= 2) {
+            const step = Math.max(2, Math.floor(dur / 10))
+            timestamps = Array.from({ length: Math.ceil(dur / step) }, (_, i) => i * step)
+          }
+          return [...new Set(timestamps.map(t => +t.toFixed(2)))].slice(0, 50)
+        })(),
+        detectCropParams(videoAbs, dur),
+      ])
+
+      // Build the vf filter: apply black-bar crop first (if any), then scale
+      const vfChain = cropFilter ? `${cropFilter},scale=200:-1` : 'scale=200:-1'
 
       for (const t of deduped) {
         const frameId = `${sv.id}_${t.toFixed(2)}`
         const framePath = path.join(framesDir, `${frameId}.jpg`)
 
+        // Invalidate cached dark frames (< 3 KB = mostly black — transition or heavy letterbox)
+        if (fs.existsSync(framePath) && fs.statSync(framePath).size < 3000) {
+          fs.unlinkSync(framePath)
+        }
+
         if (!fs.existsSync(framePath)) {
           try {
             await execAsync(
-              `ffmpeg -ss ${t.toFixed(3)} -i "${videoAbs}" -vframes 1 -vf "scale=200:-1" -q:v 3 "${framePath}" -y`,
+              `ffmpeg -ss ${t.toFixed(3)} -i "${videoAbs}" -vframes 1 -vf "${vfChain}" -q:v 3 "${framePath}" -y`,
               { timeout: 12000 },
             )
           } catch { continue }
         }
         if (!fs.existsSync(framePath)) continue
+
+        // Skip frames that are still too dark (fade-to-black / true black frames)
+        if (fs.statSync(framePath).size < 2500) continue
         frames.push({
           id: frameId, videoId: sv.id, time: t,
           url: `/api/workspaces/${req.params.wsId}/montage/${req.params.id}/frames/${frameId}.jpg${tokenParam}`,
@@ -580,7 +665,9 @@ router.post('/:id/transcribe', async (req, res) => {
     const { language, model } = req.body ?? {}
     const env: NodeJS.ProcessEnv = { ...process.env }
     if (language && /^[a-z]{2}$/.test(language)) env.WHISPER_LANGUAGE = language
-    if (model    && /^(tiny|base|small|medium|large)/.test(model))  env.WHISPER_MODEL = model
+    // New VPS: 7.8 GB RAM — large-v3 (~3 GB) and large-v3-turbo (~1.6 GB) are supported
+    const safeModel = model ?? 'small'
+    if (/^(tiny|base|small|medium|large-v2|large-v3|large-v3-turbo)$/.test(safeModel)) env.WHISPER_MODEL = safeModel
 
     // Read audio offset and duration from saved beat data so we transcribe
     // only the exact segment used in the video (timestamps then match the timeline)
@@ -763,6 +850,34 @@ router.patch('/:id/clips', async (req, res) => {
       ),
     )
     res.json({ ok: true })
+  } catch (e: any) {
+    res.status(e.status ?? 500).json({ error: e.message })
+  }
+})
+
+// ── POST /api/workspaces/:wsId/montage/:id/clips ─── Add clip from scene frame ─
+router.post('/:id/clips', async (req, res) => {
+  try {
+    await requireMember(req.params.wsId, req.user!.userId)
+    const { sourceVideoId, clipStart, clipEnd } = req.body as { sourceVideoId: string; clipStart: number; clipEnd: number }
+    if (!sourceVideoId || clipStart == null || clipEnd == null) {
+      res.status(400).json({ error: 'sourceVideoId, clipStart and clipEnd are required' }); return
+    }
+    // Append at the end of existing clips
+    const existing = await prisma.montageClip.count({ where: { projectId: req.params.id } })
+    const clip = await prisma.montageClip.create({
+      data: {
+        projectId: req.params.id,
+        sourceVideoId,
+        position: existing,
+        clipStart,
+        clipEnd,
+        outputStart: 0,
+        outputDuration: clipEnd - clipStart,
+        transition: 'cut',
+      },
+    })
+    res.status(201).json({ clip })
   } catch (e: any) {
     res.status(e.status ?? 500).json({ error: e.message })
   }

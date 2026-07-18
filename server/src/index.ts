@@ -15,6 +15,9 @@ import galleryRouter from './routes/gallery'
 import adminRouter from './routes/admin'
 import montageRouter from './routes/montage'
 import socialRouter from './routes/social'
+import notificationsRouter from './routes/notifications'
+import tunnelRouter from './routes/tunnel'
+import convertRouter from './routes/convert'
 import { montageQueue } from './services/montage/renderQueue'
 import { startScheduler } from './services/social/scheduler'
 
@@ -43,6 +46,7 @@ app.use(rateLimit({
   skip: (req) => {
     const p = req.path
     return p.endsWith('/status') || p.endsWith('/thumbnail') || p.endsWith('/stream')
+      || p.startsWith('/api/tunnel/') // tunnel heartbeat + job polling
   },
 }))
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }))
@@ -65,7 +69,10 @@ app.use('/api/workspaces/:wsId/gallery', galleryRouter)
 app.use('/api/workspaces/:wsId/bots', botsRouter)
 app.use('/api/workspaces/:wsId/montage', montageRouter)
 app.use('/api/workspaces/:wsId/social', socialRouter)
+app.use('/api/workspaces/:wsId/notifications', notificationsRouter)
 app.use('/api/admin', adminRouter)
+app.use('/api/tunnel', tunnelRouter)
+app.use('/api/workspaces/:wsId/convert', convertRouter)
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }))

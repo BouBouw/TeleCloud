@@ -1,6 +1,6 @@
 ﻿import type { Translations } from '../types'
 export const fr: Translations = {
-  logo_brand:'Vibot',nav_dashboard:'Tableau de bord',nav_library:'Bibliothèque',nav_gallery:'Galerie',nav_studio:'Studio',nav_montage:'Montage',nav_channels:'Canaux',
+  logo_brand:'Vibot',nav_dashboard:'Tableau de bord',nav_library:'Bibliothèque',nav_gallery:'Galerie',nav_studio:'Studio',nav_montage:'Montage',nav_channels:'Canaux',nav_members:'Membres',
   role_admin:'Admin',role_user:'Utilisateur',
   search_placeholder:'Rechercher…',notifications_heading:'Notifications',notifications_mark_all_read:'Tout lire',
   notif_1_text:'Piste scrapée avec succès',notif_2_text:'MusicBot Alpha est en ligne',notif_3_text:'Broadcast envoyé @synthwave_ch',notif_4_text:'12 nouvelles pistes dans Library',
@@ -61,7 +61,7 @@ export const fr: Translations = {
   no_results_hint:'Aucun résultat. Essaie un autre terme.',search_empty_hint:'Tape quelque chose pour rechercher.',
   done_heading:"C'est parti !",done_desc:'Ton workspace est prêt. Rendez-vous sur le dashboard pour commencer à diffuser ta musique sur Telegram.',
   status_created:'Créé',status_skipped:'Passé',status_deployed:'Déployé',status_imported:'Importée',btn_go_dashboard:'Aller au Dashboard',
-  page_title_settings:'Paramètres',nav_appearance:'Apparence',nav_language:'Langue',nav_preferences:'Préférences',nav_accounts:'Comptes connectés',nav_subscription:'Abonnement',
+  page_title_settings:'Paramètres',nav_appearance:'Apparence',nav_language:'Langue',nav_preferences:'Préférences',nav_accounts:'Comptes connectés',nav_subscription:'Abonnement',nav_account:'Compte',
   section_appearance:'Apparence',row_theme:'Thème',row_theme_desc:"Couleurs de l'interface",theme_dark:'Sombre',theme_light:'Clair',
   badge_soon:'Bientôt',row_reduced_motion:'Réduire les animations',row_reduced_motion_desc:"Désactive les transitions d'interface",
   section_language_region:'Langue & Région',row_interface_lang:"Langue de l'interface",row_interface_lang_desc:"Langue affichée dans l'application",
@@ -106,4 +106,8 @@ export const fr: Translations = {
   results_count:'{N} résultats',platform_coming_soon:'Bientôt',
   search_cat_tracks:'Pistes',search_cat_bots:'Bots',search_cat_videos:'Vidéos',search_no_results:'Aucun résultat',
   sc_search_placeholder:'Rechercher un titre, artiste ou coller un lien SoundCloud',sc_load_more:'Afficher plus',sc_already_in_lib:'{title} d\u00e9j\u00e0 dans la librairie',sc_added_success:'{title} ajout\u00e9 !',social_mode_choose:'Choisir',step2_url_sub:'Lien direct vers le contenu',step2_username_sub:'Profil @{username} sur {platform}',ct_tiktok_videos_desc:'Derni\u00e8res vid\u00e9os publiques',ct_tiktok_stories_desc:'Stories TikTok (si publiques)',ct_instagram_posts_desc:'Publications du profil',ct_instagram_reels_desc:'Reels du profil',ct_instagram_stories_desc:'Stories (requiert auth)',ct_x_videos_desc:'Tweets avec vid\u00e9os',ct_x_posts_desc:'Tous les tweets media',ct_snapchat_stories_desc:'Stories publiques actuelles',ct_snapchat_highlights_desc:'Stories \u00e9pingl\u00e9es',
+  studio_separate_audio:"Séparer l'audio",studio_load_main:"Charger comme piste principale",studio_reset_track:"Réinitialiser la piste",studio_delete_track:"Supprimer la piste",
+  studio_record:"Enregistrer au micro",studio_stop_record:"Arrêter l'enregistrement",studio_undo:"Annuler",studio_redo:"Rétablir",studio_fade_in:"Fondu d'entrée",studio_fade_out:"Fondu de sortie",
+  studio_silence:"Silence",studio_normalize:"Normaliser",studio_reverse:"Inverser",studio_split:"Diviser au curseur",studio_trim:"Rogner à la sélection",
+  shortcut_undo:"Annuler / Rétablir",shortcut_split:"Diviser au curseur",shortcut_record:"Enregistrer",
 }

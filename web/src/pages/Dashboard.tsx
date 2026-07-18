@@ -5,8 +5,9 @@ import {
   Play, Activity, Users, ArrowUpRight,
   Loader2, TrendingUp, Hash,
 } from 'lucide-react'
-import { wsApi, trackApi, botApi } from '../lib/api'
-import type { Track, Bot as BotType, Workspace } from '../lib/api'
+import { trackApi, botApi } from '../lib/api'
+import type { Track, Bot as BotType } from '../lib/api'
+import { useWorkspaces } from '../store/workspaceStore'
 import { useI18n } from '../i18n'
 
 /* ─── Design tokens ─── */
@@ -70,25 +71,20 @@ function StatCard({ label, value, icon: Icon, accent, loading }: {
 export default function Dashboard() {
   const navigate = useNavigate()
   const { t } = useI18n()
-  const [ws,      setWs]      = useState<Workspace | null>(null)
+  const { workspace: ws } = useWorkspaces()
   const [tracks,  setTracks]  = useState<Track[]>([])
   const [total,   setTotal]   = useState(0)
   const [bots,    setBots]    = useState<BotType[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    wsApi.list()
-      .then(d => {
-        const w = d.workspaces[0] ?? null
-        setWs(w)
-        if (!w) { setLoading(false); return }
-        Promise.all([
-          trackApi.list(w.id).then(td => { setTracks(td.tracks.slice(0, 8)); setTotal(td.total) }),
-          botApi.list(w.id).then(bd => setBots(bd.bots)),
-        ]).finally(() => setLoading(false))
-      })
-      .catch(() => setLoading(false))
-  }, [])
+    if (!ws) return
+    setLoading(true)
+    Promise.all([
+      trackApi.list(ws.id).then(td => { setTracks(td.tracks.slice(0, 8)); setTotal(td.total) }),
+      botApi.list(ws.id).then(bd => setBots(bd.bots)),
+    ]).finally(() => setLoading(false))
+  }, [ws])
 
   const activeBots = bots.filter(b => b.status === 'running')
 

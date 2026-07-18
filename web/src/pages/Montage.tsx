@@ -2,8 +2,9 @@ import React from 'react'
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Clapperboard, Trash2, Loader2, ChevronRight, X, Film } from 'lucide-react'
-import { wsApi, montageApi } from '../lib/api'
-import type { Workspace, MontageProject, MontageStyle, MontageDuration, MontageRatio } from '../lib/api'
+import { montageApi } from '../lib/api'
+import type { MontageProject, MontageStyle, MontageDuration, MontageRatio } from '../lib/api'
+import { useWorkspaces } from '../store/workspaceStore'
 import { useI18n } from '../i18n'
 
 const S = {
@@ -51,7 +52,7 @@ export default function Montage() {
   const { t } = useI18n()
   const navigate = useNavigate()
 
-  const [workspace, setWorkspace] = useState<Workspace | null>(null)
+  const { workspace } = useWorkspaces()
   const [projects, setProjects]   = useState<MontageProject[]>([])
   const [loading, setLoading]     = useState(true)
   const [showForm, setShowForm]   = useState(false)
@@ -63,12 +64,9 @@ export default function Montage() {
   const [deleting, setDeleting]   = useState<string | null>(null)
 
   useEffect(() => {
-    wsApi.list().then(({ workspaces }) => {
-      const ws = workspaces[0]; if (!ws) { setLoading(false); return }
-      setWorkspace(ws)
-      montageApi.list(ws.id).then(({ projects: p }) => setProjects(p)).catch(() => {}).finally(() => setLoading(false))
-    }).catch(() => setLoading(false))
-  }, [])
+    if (!workspace) return
+    montageApi.list(workspace.id).then(({ projects: p }) => setProjects(p)).catch(() => {}).finally(() => setLoading(false))
+  }, [workspace])
 
   const handleCreate = useCallback(async () => {
     if (!workspace || !title.trim()) return

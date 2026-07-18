@@ -3,8 +3,9 @@ import {
   Film, Download, Trash2, RefreshCw,
   HardDrive, Loader2, Play, X, LayoutGrid, List, Search,
 } from 'lucide-react'
-import { galleryApi, wsApi } from '../lib/api'
+import { galleryApi } from '../lib/api'
 import type { VideoFile, Workspace } from '../lib/api'
+import { useWorkspaces } from '../store/workspaceStore'
 import { useI18n } from '../i18n'
 
 /* ─── Design tokens (mirrors Library / Studio) ─── */
@@ -453,7 +454,7 @@ function VideoListRow({ video, wsId, onDelete, onPlay, index }: {
 /* ─── Gallery Page ─── */
 export default function Gallery() {
   const { t } = useI18n()
-  const [workspace, setWorkspace] = useState<Workspace | null>(null)
+  const { workspace } = useWorkspaces()
   const [videos,    setVideos]    = useState<VideoFile[]>([])
   const [loading,   setLoading]   = useState(true)
   const [filter,    setFilter]    = useState<string>('all')
@@ -473,12 +474,9 @@ export default function Gallery() {
   }, [])
 
   useEffect(() => {
-    wsApi.list().then(({ workspaces }) => {
-      const ws = workspaces[0]
-      if (ws) { setWorkspace(ws); load(ws) }
-      else setLoading(false)
-    }).catch(() => setLoading(false))
-  }, [load])
+    if (!workspace) return
+    load(workspace)
+  }, [workspace, load])
 
   const platforms = useMemo(() =>
     ['all', ...Array.from(new Set(videos.map(v => v.platform)))],

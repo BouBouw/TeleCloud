@@ -681,10 +681,10 @@ export default function SocialSearch({ workspaceId, platform, onScrapeSuccess, l
               </p>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: 4 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingTop: 4 }}>
               <button
                 onClick={resetWizard}
-                style={{ fontSize: 11, color: S.textFade, background: 'none', border: 'none', cursor: 'pointer' }}
+                style={{ fontSize: 11, color: S.textFade, background: 'none', border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}
               >
                 {t('btn_reset_wizard')}
               </button>
@@ -698,6 +698,7 @@ export default function SocialSearch({ workspaceId, platform, onScrapeSuccess, l
                   fontWeight: 700, fontSize: 13, cursor: 'pointer',
                   border: 'none', opacity: (scraping || !!success) ? 0.5 : 1,
                   transition: 'opacity 0.15s, transform 0.1s',
+                  flexShrink: 0,
                 }}
               >
                 {scraping

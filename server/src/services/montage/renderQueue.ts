@@ -3,6 +3,7 @@
  */
 import prisma from '../../lib/prisma'
 import { runMontageEngine } from './engine'
+import * as notifs from '../notifications'
 
 const POLL_INTERVAL_MS = 4000
 let activeJobs = 0
@@ -49,11 +50,17 @@ async function tick() {
 async function processJob(job: { id: string; projectId: string; logs: string }) {
   const { id: jobId, projectId } = job
 
+  // Fetch project to get workspaceId + title
+  const project = await prisma.montageProject.findUnique({ where: { id: projectId }, select: { workspaceId: true, title: true } })
+  const wsId    = project?.workspaceId ?? ''
+  const title   = project?.title ?? 'Montage'
+
   await prisma.montageRenderJob.update({
     where: { id: jobId },
     data: { status: 'RUNNING', currentStep: 'STARTING', startedAt: new Date() },
   })
   await prisma.montageProject.update({ where: { id: projectId }, data: { status: 'PROCESSING' } })
+  if (wsId) notifs.push(wsId, 'montage:started', 'Rendu démarré', `Montage « ${title} » en cours de rendu…`, `/montage/${projectId}`)
 
   const log = async (step: string, progress: number, message: string) => {
     const logLine = `[${new Date().toISOString()}] [${step}] ${message}\n`
@@ -70,6 +77,7 @@ async function processJob(job: { id: string; projectId: string; logs: string }) 
       where: { id: jobId },
       data: { status: 'DONE', progress: 100, currentStep: 'COMPLETED', finishedAt: new Date() },
     })
+    if (wsId) notifs.push(wsId, 'montage:done', 'Rendu terminé ✓', `Montage « ${title} » prêt.`, `/montage/${projectId}`)
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err)
     console.error('[MontageQueue] Job %s FAILED:', jobId, errMsg)
@@ -78,5 +86,6 @@ async function processJob(job: { id: string; projectId: string; logs: string }) 
       data: { status: 'FAILED', currentStep: 'FAILED', error: errMsg, finishedAt: new Date() },
     }).catch(() => {})
     await prisma.montageProject.update({ where: { id: projectId }, data: { status: 'FAILED' } }).catch(() => {})
+    if (wsId) notifs.push(wsId, 'montage:failed', 'Rendu échoué', `Montage « ${title} » a échoué : ${errMsg.slice(0, 80)}`, `/montage/${projectId}`)
   }
 }

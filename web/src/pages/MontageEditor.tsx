@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback, useRef, useMemo, type CSSProperties, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Clapperboard, Music2, Video, Download, Play, Pause,
   Trash2, Loader2, Upload, Link2, Settings2, Volume2, VolumeX,
   CheckCircle2, XCircle, Film, Maximize2, Sparkles, Type, Mic,
   Share2, Calendar, GripVertical, Layers, ZoomIn, ZoomOut,
-  Plus, PanelLeft,
+  Plus, PanelLeft, RefreshCw,
 } from 'lucide-react'
-import { wsApi, montageApi, trackApi, galleryApi, socialApi } from '../lib/api'
+import { montageApi, trackApi, galleryApi, socialApi } from '../lib/api'
 import type { Workspace, MontageProject, MontageStyle, MontageDuration, MontageRatio, MontageClip, BeatData, Track, VideoFile, SocialAccount, SocialPost } from '../lib/api'
+import { useWorkspaces } from '../store/workspaceStore'
 
 const S = {
   bg: '#111', panel: '#1a1a1a', panelAlt: '#161616', hover: '#1e1e1e',
@@ -344,6 +346,7 @@ function DraggableModal({
   const [size, setSize] = useState(defaultSize ?? { w: 330, h: 500 })
   const dragRef = useRef({ active: false, ox: 0, oy: 0, px: 0, py: 0 })
   const resRef  = useRef({ active: false, ox: 0, oy: 0, sw: 0, sh: 0 })
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (dragRef.current.active) {
@@ -361,6 +364,33 @@ function DraggableModal({
     document.addEventListener('mouseup', onUp)
     return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
   }, [])
+
+  // On mobile: full-screen bottom sheet
+  if (isMobile) {
+    return (
+      <>
+        <div className="fixed inset-0 z-40" style={{ background: 'rgba(0,0,0,0.5)' }} onClick={onClose} />
+        <div className="fixed bottom-0 left-0 right-0 z-50 flex flex-col rounded-t-2xl overflow-hidden"
+          style={{ background: '#141414', border: '1px solid #2e2e2e', maxHeight: '80vh', boxShadow: '0 -8px 32px rgba(0,0,0,0.75)' }}>
+          {/* Handle */}
+          <div className="flex justify-center pt-2 pb-1 shrink-0">
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: '#333' }} />
+          </div>
+          {/* Title bar */}
+          <div className="shrink-0 flex items-center gap-2 px-4 pb-3">
+            <span style={{ color: S.accent }}>{icon}</span>
+            <span className="text-sm font-semibold flex-1" style={{ color: '#ccc' }}>{title}</span>
+            <button onClick={onClose} style={{ color: '#444' }}><XCircle size={16} /></button>
+          </div>
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto px-4 pb-6">
+            {children}
+          </div>
+        </div>
+      </>
+    )
+  }
+
   return (
     <div className="fixed z-40 flex flex-col rounded-xl overflow-hidden"
       style={{ left: pos.x, top: pos.y, width: size.w, height: size.h, background: '#141414', border: '1px solid #2e2e2e', boxShadow: '0 16px 48px rgba(0,0,0,0.75)', userSelect: 'none' }}>
@@ -387,11 +417,101 @@ function DraggableModal({
   )
 }
 
+// ── Settings panel content (shared between desktop side panel and mobile bottom sheet) ──
+function SettingsPanelContent({
+  settingStyle, setSettingStyle,
+  settingDuration, setSettingDuration,
+  settingRatio, setSettingRatio,
+  savingSettings, handleSaveSettings,
+  socialAccounts,
+}: {
+  settingStyle: MontageStyle; setSettingStyle: (v: MontageStyle) => void
+  settingDuration: MontageDuration; setSettingDuration: (v: MontageDuration) => void
+  settingRatio: MontageRatio; setSettingRatio: (v: MontageRatio) => void
+  savingSettings: boolean; handleSaveSettings: () => void
+  socialAccounts: Array<{ platform: string }>
+}) {
+  return (
+    <div className="flex flex-col gap-4 p-3 flex-1 overflow-y-auto">
+      <div>
+        <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Style</div>
+        <select value={settingStyle} onChange={e => setSettingStyle(e.target.value as MontageStyle)}
+          className="w-full px-2 py-1.5 rounded text-xs outline-none"
+          style={{ background: '#0a0a0a', border: '1px solid #222', color: '#ccc' }}>
+          {STYLES_LIST.map(k => <option key={k} value={k}>{STYLE_LABELS[k]}</option>)}
+        </select>
+      </div>
+      <div>
+        <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Durée</div>
+        <div className="flex gap-1 flex-wrap">
+          {DURATIONS_LIST.map(k => (
+            <button key={k} onClick={() => setSettingDuration(k)}
+              className="py-1 rounded text-[9px] font-semibold px-1.5"
+              style={{
+                background: settingDuration === k ? S.accent + '20' : '#0a0a0a',
+                border: `1px solid ${settingDuration === k ? S.accent + '60' : '#222'}`,
+                color: settingDuration === k ? S.accent : '#555',
+              }}>
+              {DURATION_LABELS[k]}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div>
+        <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Format</div>
+        <div className="flex gap-1">
+          {RATIOS_LIST.map(k => (
+            <button key={k} onClick={() => setSettingRatio(k)}
+              className="flex-1 py-1.5 rounded text-[9px] font-semibold"
+              style={{
+                background: settingRatio === k ? S.accent + '20' : '#0a0a0a',
+                border: `1px solid ${settingRatio === k ? S.accent + '60' : '#222'}`,
+                color: settingRatio === k ? S.accent : '#555',
+              }}>
+              {RATIO_LABELS[k]}
+            </button>
+          ))}
+        </div>
+      </div>
+      <button onClick={handleSaveSettings} disabled={savingSettings}
+        className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-semibold disabled:opacity-40"
+        style={{ background: S.accent, color: '#000' }}>
+        {savingSettings ? <Loader2 size={11} className="animate-spin" /> : null} Sauvegarder
+      </button>
+      <div>
+        <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: '#555' }}>Comptes sociaux</div>
+        <p className="text-[9px] mb-2" style={{ color: '#444' }}>
+          Gérez vos comptes dans <span style={{ color: S.accent }}>Paramètres → Comptes connectés</span>
+        </p>
+        <div className="flex flex-col gap-1">
+          {(Object.keys(PLATFORM_CONFIG) as SocialPlatform[]).map(pl => {
+            const cfg = PLATFORM_CONFIG[pl]
+            const accs = socialAccounts.filter(a => a.platform === pl)
+            return (
+              <div key={pl} className="flex items-center gap-2 px-2 py-1.5 rounded" style={{ background: '#0e0e0e', border: '1px solid #1e1e1e' }}>
+                <span style={{ fontSize: 11 }}>{cfg.emoji}</span>
+                <span className="text-[9px] font-semibold flex-1" style={{ color: '#999' }}>{cfg.label}</span>
+                {accs.length > 0 ? (
+                  <span className="text-[8px] px-1.5 py-0.5 rounded" style={{ background: '#4ade8015', color: '#4ade80', border: '1px solid #4ade8030' }}>
+                    {accs.length} compte{accs.length > 1 ? 's' : ''}
+                  </span>
+                ) : (
+                  <span className="text-[8px]" style={{ color: '#333' }}>—</span>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function MontageEditor() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
-  const [workspace, setWorkspace]   = useState<Workspace | null>(null)
+  const { workspace } = useWorkspaces()
   const [project, setProject]       = useState<MontageProject | null>(null)
   const [loading, setLoading]       = useState(true)
   const [tab, setTab]               = useState<Tab>('audio')
@@ -410,10 +530,21 @@ export default function MontageEditor() {
   const [videoUploading, setVideoUploading] = useState(false)
   const videoInputRef = useRef<HTMLInputElement>(null)
   const [removingVid, setRemovingVid] = useState<string | null>(null)
+  const [extractingAudio, setExtractingAudio] = useState<string | null>(null)
   const [generating, setGenerating] = useState(false)
   const pollRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dlPollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  // matchMedia = exact same logic as CSS @media queries, more reliable than window.innerWidth
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)').matches : false
+  )
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)')
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
   const [settingStyle, setSettingStyle] = useState<MontageStyle>('DARK_TRAP')
   const [settingDuration, setSettingDuration] = useState<MontageDuration>('AUTO')
   const [settingRatio, setSettingRatio] = useState<MontageRatio>('LANDSCAPE')
@@ -449,7 +580,6 @@ export default function MontageEditor() {
   const [transcriptModel, setTranscriptModel] = useState('small')
   const [transcribing, setTranscribing] = useState(false)
   const [transcriptSegments, setTranscriptSegments] = useState<Array<{ start: number; end: number; text: string }> | null>(null)
-  const [editingSegIdx, setEditingSegIdx] = useState<number | null>(null)
 
   // ── Social / Publish ──────────────────────────────────────────────
   const [showPublish, setShowPublish] = useState(false)
@@ -459,6 +589,9 @@ export default function MontageEditor() {
   const [showEffectsModal,  setShowEffectsModal]  = useState(false)
   const [showLyricsModal,   setShowLyricsModal]   = useState(false)
   const [showLibraryModal,  setShowLibraryModal]  = useState(false)
+  const [lyricsTab,         setLyricsTab]         = useState<'segments' | 'style'>('segments')
+  const [pasteText,         setPasteText]         = useState('')
+  const [effectAnimKeys,    setEffectAnimKeys]     = useState<Record<string, number>>({})
 
   // ── Audio player ──────────────────────────────────────────────────
   const audioPlayerRef = useRef<HTMLAudioElement>(null)
@@ -488,6 +621,8 @@ export default function MontageEditor() {
   const tlDurationRef  = useRef(60)
   // Prevents onTimeUpdate from overriding seek position while the user drags the seek bar
   const isSeekingRef   = useRef(false)
+  // Touch drag state for mobile timeline reordering
+  const touchDragRef   = useRef<{ clipIdx: number } | null>(null)
 
   // ── Scene frames (Library modal) ──────────────────────────────────
   const [sceneFrames, setSceneFrames]   = useState<Array<{ id: string; videoId: string; time: number; url: string }>>([])
@@ -515,29 +650,27 @@ export default function MontageEditor() {
 
 
   useEffect(() => {
-    wsApi.list().then(({ workspaces }) => {
-      const ws = workspaces[0]; if (!ws) { setLoading(false); return }
-      setWorkspace(ws)
-      trackApi.list(ws.id).then(({ tracks }) => setLibTracks(tracks)).catch(() => {})
-      galleryApi.list(ws.id).then(({ videos }) => setGalleryVideos(videos)).catch(() => {})
-      socialApi.listAccounts(ws.id).then(({ accounts }) => setSocialAccounts(accounts)).catch(() => {})
-      if (!id) { setLoading(false); return }
-      montageApi.get(ws.id, id).then(({ project: p }) => {
-        setProject(p); setSettingStyle(p.style); setSettingDuration(p.durationMode); setSettingRatio(p.ratio)
-        // Restore previously saved transcription so the user doesn't need to re-run Whisper
-        if (p.subtitleData) {
-          try { setTranscriptSegments(JSON.parse(p.subtitleData)) } catch { /* ignore corrupt data */ }
-        }
-        if (p.status === 'QUEUED' || p.status === 'PROCESSING') startPolling(ws.id, id)
-        if (p.sourceVideos.some(sv => !sv.localPath && !sv.source.startsWith('ERROR:'))) startDlPolling(ws.id, id)
-        // Load generated clips and beat data if project is already completed
-        if (p.status === 'COMPLETED') {
-          montageApi.getClips(ws.id, id).then(({ clips }) => setGeneratedClips(clips)).catch(() => {})
-          montageApi.getBeatData(ws.id, id).then(({ beatData: bd }) => setBeatData(bd)).catch(() => {})
-        }
-      }).catch(e => setError((e as Error).message)).finally(() => setLoading(false))
-    }).catch(() => setLoading(false))
-  }, [id])
+    if (!workspace) return
+    trackApi.list(workspace.id).then(({ tracks }) => setLibTracks(tracks)).catch(() => {})
+    galleryApi.list(workspace.id).then(({ videos }) => setGalleryVideos(videos)).catch(() => {})
+    socialApi.listAccounts(workspace.id).then(({ accounts }) => setSocialAccounts(accounts)).catch(() => {})
+    if (!id) { setLoading(false); return }
+    montageApi.get(workspace.id, id).then(({ project: p }) => {
+      setProject(p); setSettingStyle(p.style); setSettingDuration(p.durationMode); setSettingRatio(p.ratio)
+      // Restore previously saved transcription so the user doesn't need to re-run Whisper
+      if (p.subtitleData) {
+        try { setTranscriptSegments(JSON.parse(p.subtitleData)) } catch { /* ignore corrupt data */ }
+      }
+      if (p.status === 'QUEUED' || p.status === 'PROCESSING') startPolling(workspace.id, id)
+      if (p.sourceVideos.some(sv => !sv.localPath && !sv.source.startsWith('ERROR:'))) startDlPolling(workspace.id, id)
+      // Load generated clips and beat data if project is already completed
+      if (p.status === 'COMPLETED') {
+        montageApi.getClips(workspace.id, id).then(({ clips }) => setGeneratedClips(clips)).catch(() => {})
+        montageApi.getBeatData(workspace.id, id).then(({ beatData: bd }) => setBeatData(bd)).catch(() => {})
+      }
+    }).catch(e => setError((e as Error).message)).finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace, id])
 
   const startPolling = useCallback((wsId: string, projId: string) => {
     if (pollRef.current) return
@@ -679,6 +812,8 @@ export default function MontageEditor() {
   }, [currentTime, vidDuration, waveformBars, tlZoom])
 
   // ── Load scene frames when Library modal opens ───────────────────
+  // Frames are cached per project — only re-fetched when project changes
+  useEffect(() => { setSceneFrames([]); setLoadingFrames(false) }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!showLibraryModal || !workspace || !id || sceneFrames.length > 0) return
     setLoadingFrames(true)
@@ -855,6 +990,15 @@ export default function MontageEditor() {
     finally { setUsingTrack(null) }
   }, [workspace, id])
 
+  const handleAddFrameAsClip = useCallback(async (frame: { id: string; videoId: string; time: number }) => {
+    if (!workspace || !id) return
+    const clipDuration = 3 // seconds
+    try {
+      const { clip } = await montageApi.addClip(workspace.id, id, frame.videoId, frame.time, frame.time + clipDuration)
+      setGeneratedClips(prev => [...prev, clip])
+    } catch (e: unknown) { alert((e as Error).message) }
+  }, [workspace, id])
+
   const handleAddUrl = useCallback(async () => {
     if (!workspace || !id || !urlInput.trim()) return
     setAddingUrl(true)
@@ -885,6 +1029,24 @@ export default function MontageEditor() {
       setProject(prev => prev ? { ...prev, sourceVideos: prev.sourceVideos.filter(sv => sv.id !== svId) } : prev)
     } catch (e: unknown) { alert((e as Error).message) }
     finally { setRemovingVid(null) }
+  }, [workspace, id])
+
+  const handleUseVideoAudio = useCallback(async (svId: string) => {
+    if (!workspace || !id) return
+    setExtractingAudio(svId)
+    try {
+      const { project: p } = await montageApi.audioFromVideo(workspace.id, id, svId)
+      setProject(p)
+    } catch (e: unknown) { alert((e as Error).message) }
+    finally { setExtractingAudio(null) }
+  }, [workspace, id])
+
+  const handleRemoveAudio = useCallback(async () => {
+    if (!workspace || !id) return
+    try {
+      const { project: p } = await montageApi.patch(workspace.id, id, { audioPath: null })
+      setProject(p)
+    } catch (e: unknown) { alert((e as Error).message) }
   }, [workspace, id])
 
   const handleAddFromGallery = useCallback(async (videoFileId: string) => {
@@ -1202,6 +1364,13 @@ export default function MontageEditor() {
               {generatingMulti ? <Loader2 size={11} className="animate-spin" /> : <Layers size={11} />}
               Multi-format
             </button>
+            <button onClick={handleGenerate} disabled={generating}
+              title="Regénérer entièrement la vidéo (nouvelle analyse des frames)"
+              className="flex items-center gap-1 px-2 py-1.5 rounded text-xs font-semibold disabled:opacity-40"
+              style={{ background: '#1a1a1a', border: '1px solid #333', color: '#888' }}>
+              {generating ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+              Regénérer
+            </button>
             <button onClick={() => setShowPublish(true)}
               className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-semibold"
               style={{ background: '#6366f1', color: '#fff' }}>
@@ -1345,7 +1514,7 @@ export default function MontageEditor() {
                       className="w-full px-2 py-1.5 rounded text-[10px] outline-none mb-2"
                       style={{ background: '#0a0a0a', border: '1px solid #2e2e2e', color: '#ccc' }}
                     />
-                    <div className="flex flex-col gap-0.5 overflow-y-auto" style={{ maxHeight: 590 }}>
+                    <div className="flex flex-col gap-0.5 overflow-y-auto" style={{ maxHeight: 590, WebkitUserSelect: 'none', userSelect: 'none' }}>
                       {libTracks
                         .filter(t => !libSearch || `${t.title} ${t.artist ?? ''}`.toLowerCase().includes(libSearch.toLowerCase()))
                         .map(t => {
@@ -1354,12 +1523,15 @@ export default function MontageEditor() {
                           return (
                             <button
                               key={t.id}
-                              onClick={() => handleUseTrack(t.id)}
-                              disabled={!!usingTrack}
-                              className="flex items-center gap-2 px-2 py-1.5 rounded text-left w-full group disabled:opacity-50"
+                              onClick={() => isActive ? handleRemoveAudio() : (!usingTrack && handleUseTrack(t.id))}
+                              title={isActive ? 'Retirer cet audio' : undefined}
+                              className="flex items-center gap-2 px-2 py-1.5 rounded text-left w-full"
                               style={{
                                 background: isActive ? S.accent + '18' : '#141414',
                                 border: `1px solid ${isActive ? S.accent + '50' : '#2e2e2e'}`,
+                                opacity: usingTrack && !isLoading ? 0.5 : 1,
+                                cursor: usingTrack && !isActive ? 'default' : 'pointer',
+                                WebkitTapHighlightColor: 'transparent',
                               }}
                             >
                               {t.artworkUrl
@@ -1373,8 +1545,8 @@ export default function MontageEditor() {
                               {isLoading
                                 ? <Loader2 size={10} className="animate-spin shrink-0" style={{ color: S.accent }} />
                                 : isActive
-                                  ? <CheckCircle2 size={10} className="shrink-0" style={{ color: S.accent }} />
-                                  : <span className="text-[9px] opacity-0 group-hover:opacity-100 shrink-0" style={{ color: S.accent }}>Utiliser</span>
+                                  ? <XCircle size={10} className="shrink-0" style={{ color: S.accent }} />
+                                  : <span className="text-[9px] shrink-0" style={{ color: S.accent + '80' }}>▶</span>
                               }
                             </button>
                           )
@@ -1428,6 +1600,8 @@ export default function MontageEditor() {
                       const isError = sv.source.startsWith('ERROR:')
                       const isDone  = !!sv.localPath
                       const isPending = !isDone && !isError
+                      const isAudioActive = project.audioPath?.includes(sv.id)
+                      const isExtracting = extractingAudio === sv.id
                       return (
                         <div key={sv.id} className="flex items-center gap-2 px-2 py-1.5 rounded group"
                           style={{ background: '#141414', border: `1px solid ${isError ? S.red + '40' : '#2e2e2e'}` }}>
@@ -1455,6 +1629,20 @@ export default function MontageEditor() {
                                   : sv.duration != null ? `${Math.round(sv.duration)}s · prêt` : 'Prêt'}
                             </div>
                           </div>
+                          {/* Extract audio from this video */}
+                          {isDone && (
+                            <button
+                              onClick={() => !extractingAudio && handleUseVideoAudio(sv.id)}
+                              disabled={!!extractingAudio}
+                              title={isAudioActive ? 'Audio de cette vidéo utilisé' : 'Utiliser l\'audio de cette vidéo'}
+                              className="opacity-0 group-hover:opacity-100 p-1 rounded shrink-0"
+                              style={{ color: isAudioActive ? S.accent : '#666', border: `1px solid ${isAudioActive ? S.accent + '50' : 'transparent'}` }}
+                              onMouseEnter={e => { if (!isAudioActive) (e.currentTarget as HTMLElement).style.color = S.cyan }}
+                              onMouseLeave={e => { if (!isAudioActive) (e.currentTarget as HTMLElement).style.color = '#666' }}
+                            >
+                              {isExtracting ? <Loader2 size={10} className="animate-spin" /> : <Music2 size={10} />}
+                            </button>
+                          )}
                           <button onClick={() => handleRemoveVideo(sv.id)} disabled={removingVid === sv.id}
                             className="opacity-0 group-hover:opacity-100 p-1 rounded"
                             style={{ color: '#555' }}
@@ -1484,17 +1672,21 @@ export default function MontageEditor() {
                         .filter(v => !gallerySearch || `${v.title} ${v.artist ?? ''}`.toLowerCase().includes(gallerySearch.toLowerCase()))
                         .map(v => {
                           const alreadyAdded = project.sourceVideos.some(sv => sv.localPath === v.filePath)
+                          const addedSvId = project.sourceVideos.find(sv => sv.localPath === v.filePath)?.id
                           const isLoading = addingFromGallery === v.id
                           return (
                             <button
                               key={v.id}
-                              onClick={() => !alreadyAdded && handleAddFromGallery(v.id)}
-                              disabled={!!addingFromGallery || alreadyAdded}
+                              onClick={() => {
+                                if (alreadyAdded && addedSvId) { handleRemoveVideo(addedSvId); return }
+                                if (!addingFromGallery) handleAddFromGallery(v.id)
+                              }}
+                              disabled={alreadyAdded ? removingVid === addedSvId : !!addingFromGallery}
                               className="flex items-center gap-2 px-2 py-1.5 rounded text-left w-full group disabled:opacity-60"
                               style={{
                                 background: alreadyAdded ? S.accent + '12' : '#141414',
                                 border: `1px solid ${alreadyAdded ? S.accent + '40' : '#2e2e2e'}`,
-                                cursor: alreadyAdded ? 'default' : 'pointer',
+                                cursor: 'pointer',
                               }}
                             >
                               {v.thumbnailUrl
@@ -1509,9 +1701,11 @@ export default function MontageEditor() {
                               </div>
                               {isLoading
                                 ? <Loader2 size={10} className="animate-spin shrink-0" style={{ color: S.accent }} />
-                                : alreadyAdded
-                                  ? <CheckCircle2 size={10} className="shrink-0" style={{ color: S.accent }} />
-                                  : <span className="text-[9px] opacity-0 group-hover:opacity-100 shrink-0" style={{ color: S.accent }}>Ajouter</span>
+                                : removingVid === addedSvId
+                                  ? <Loader2 size={10} className="animate-spin shrink-0" style={{ color: S.red }} />
+                                  : alreadyAdded
+                                    ? <span className="shrink-0 opacity-60 group-hover:opacity-100 flex items-center" title="Retirer"><XCircle size={10} style={{ color: S.red }} /></span>
+                                    : <span className="text-[9px] opacity-0 group-hover:opacity-100 shrink-0" style={{ color: S.accent }}>Ajouter</span>
                               }
                             </button>
                           )
@@ -1791,6 +1985,13 @@ export default function MontageEditor() {
                 style={{ height: 8, background: '#0f0f0f', borderBottom: '1px solid #1a1a1a' }}
                 onMouseDown={e => { tlResizeRef.current = { active: true, startY: e.clientY, startH: timelineHeight } }}>
                 <GripVertical size={10} style={{ color: '#2e2e2e', transform: 'rotate(90deg)' }} />
+                {/* Mobile: quick-add + panel toggle button */}
+                <button className="md:hidden flex items-center gap-1 text-[8px] px-1.5 rounded"
+                  style={{ color: '#555', lineHeight: 1 }}
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); setTab('videos'); setShowMobilePanel(true) }}>
+                  <Plus size={8} /> Ajouter
+                </button>
                 {/* Keyboard shortcuts hint — not a drag handle, stop propagation */}
                 <div className="relative" onMouseDown={e => e.stopPropagation()}>
                   <button title="Raccourcis clavier"
@@ -1848,7 +2049,7 @@ export default function MontageEditor() {
                   style={{ scrollbarWidth: 'thin', scrollbarColor: '#2a2a2a transparent' }}>
                   <div style={{ width: totalTlW + 48, minWidth: '100%', position: 'relative' }}>
 
-                    {/* Ruler — click/drag to scrub */}
+                    {/* Ruler — click/drag/touch to scrub */}
                     <div className="flex items-end sticky top-0 z-10 cursor-col-resize select-none"
                       style={{ height: 20, background: '#0a0a0a', borderBottom: '1px solid #111' }}
                       onMouseDown={e => {
@@ -1859,7 +2060,27 @@ export default function MontageEditor() {
                         setCurrentTime(t)
                         if (videoRef.current) videoRef.current.currentTime = t
                         if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
-                      }}>
+                      }}
+                      onTouchStart={e => {
+                        scrubRef.current = true
+                        const rect = tlScrollRef.current!.getBoundingClientRect()
+                        const x = e.touches[0].clientX - rect.left + (tlScrollRef.current?.scrollLeft ?? 0)
+                        const t = Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current))
+                        setCurrentTime(t)
+                        if (videoRef.current) videoRef.current.currentTime = t
+                        if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
+                      }}
+                      onTouchMove={e => {
+                        if (!scrubRef.current) return
+                        e.preventDefault()
+                        const rect = tlScrollRef.current!.getBoundingClientRect()
+                        const x = e.touches[0].clientX - rect.left + (tlScrollRef.current?.scrollLeft ?? 0)
+                        const t = Math.max(0, Math.min(tlDurationRef.current, x / pxPerSecRef.current))
+                        setCurrentTime(t)
+                        if (videoRef.current) videoRef.current.currentTime = t
+                        if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
+                      }}
+                      onTouchEnd={() => { scrubRef.current = false }}>
                       {Array.from({ length: Math.ceil(timelineDuration ?? 0) + 1 }, (_, i) => {
                         const x = i * pxPerSec
                         if (x > totalTlW + 8) return null
@@ -1977,15 +2198,29 @@ export default function MontageEditor() {
                       {/* Selected clip action bar */}
                       {selectedClipId && (
                         <div className="absolute top-1 right-2 z-20 flex items-center gap-1 px-1.5 py-0.5 rounded"
-                          style={{ background: '#111', border: '1px solid #2a2a2a', pointerEvents: 'none' }}>
-                          {[
+                          style={{ background: '#111', border: '1px solid #2a2a2a' }}>
+                          {/* Mobile: real action buttons */}
+                          <button className="md:hidden flex items-center gap-0.5 text-[8px] px-1.5 py-0.5 rounded"
+                            style={{ background: '#e74c3c22', color: '#e74c3c', border: '1px solid #e74c3c44' }}
+                            onClick={() => {
+                              const toRemove = selectedClipId
+                              setSelectedClipId(null)
+                              setClipboardClipId(prev => prev === toRemove ? null : prev)
+                              montageApi.removeVideo(workspace!.id, id!, toRemove)
+                                .then(() => setProject(prev => prev ? { ...prev, sourceVideos: prev.sourceVideos.filter(sv => sv.id !== toRemove) } : prev))
+                                .catch((err: unknown) => alert((err as Error).message))
+                            }}>
+                            <Trash2 size={9} /> Suppr.
+                          </button>
+                          {/* Desktop: keyboard shortcut hints */}
+                          {([
                             ['Del', 'Suppr'],
                             ['Ctrl+C', 'Copier'],
                             ['Ctrl+X', 'Couper'],
                             ['Ctrl+D', 'Dupliquer'],
                             ...(clipboardClipId ? [['Ctrl+V', 'Coller']] : []),
-                          ].map(([key, label]) => (
-                            <span key={key} className="flex items-center gap-0.5 text-[7px]" style={{ color: '#444' }}>
+                          ] as [string, string][]).map(([key, label]) => (
+                            <span key={key} className="hidden md:flex items-center gap-0.5 text-[7px]" style={{ color: '#444' }}>
                               <kbd className="px-0.5 rounded" style={{ background: '#1e1e1e', border: '1px solid #333', color: '#666', fontFamily: 'monospace' }}>{key}</kbd>
                               <span>{label}</span>
                             </span>
@@ -2026,6 +2261,37 @@ export default function MontageEditor() {
                             }}
                             onDragEnd={() => { setDragClipIdx(null); setDropClipIdx(null) }}
                             onClick={() => setSelectedClipId(isSelected ? null : sv.id)}
+                            onTouchStart={_e => {
+                              touchDragRef.current = { clipIdx: i }
+                              setDragClipIdx(i)
+                              setSelectedClipId(isSelected ? null : sv.id)
+                            }}
+                            onTouchMove={e => {
+                              if (!touchDragRef.current) return
+                              e.preventDefault()
+                              const container = tlScrollRef.current
+                              if (!container) return
+                              const rect = container.getBoundingClientRect()
+                              const relX = e.touches[0].clientX - rect.left + container.scrollLeft
+                              let acc = 0
+                              for (let j = 0; j < orderedClips.length; j++) {
+                                const w = Math.max(36, (orderedClips[j].duration ?? 10) * pxPerSecRef.current)
+                                if (relX < acc + w / 2) { setDropClipIdx(j); return }
+                                acc += w
+                              }
+                              setDropClipIdx(orderedClips.length - 1)
+                            }}
+                            onTouchEnd={() => {
+                              if (touchDragRef.current && dragClipIdx !== null && dropClipIdx !== null && dragClipIdx !== dropClipIdx) {
+                                const newOrder = [...localClipOrder]
+                                const [moved] = newOrder.splice(dragClipIdx, 1)
+                                newOrder.splice(dropClipIdx, 0, moved)
+                                setLocalClipOrder(newOrder)
+                                if (workspace) montageApi.reorderVideos(workspace.id, project.id, newOrder).catch(() => {})
+                              }
+                              setDragClipIdx(null); setDropClipIdx(null)
+                              touchDragRef.current = null
+                            }}
                             className="absolute flex flex-col justify-between rounded overflow-hidden cursor-grab active:cursor-grabbing"
                             style={{
                               left: x, top: 4, bottom: 4, width: clipW - 2,
@@ -2129,8 +2395,8 @@ export default function MontageEditor() {
           )}
         </div>
 
-        {/* ── Settings panel ── */}
-        {showSettings && (
+        {/* ── Settings panel: desktop side panel (inline in flex row, desktop only) ── */}
+        {showSettings && !isMobile && (
           <div className="shrink-0 flex flex-col border-l" style={{ width: 240, background: '#161616', borderColor: '#222' }}>
             <div className="flex items-center justify-between px-3 py-2.5 border-b shrink-0" style={{ borderColor: '#222' }}>
               <div className="flex items-center gap-1.5">
@@ -2141,85 +2407,56 @@ export default function MontageEditor() {
                 <XCircle size={12} />
               </button>
             </div>
-            <div className="flex flex-col gap-4 p-3 flex-1 overflow-y-auto">
-              <div>
-                <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Style</div>
-                <select value={settingStyle} onChange={e => setSettingStyle(e.target.value as MontageStyle)}
-                  className="w-full px-2 py-1.5 rounded text-xs outline-none"
-                  style={{ background: '#0a0a0a', border: '1px solid #222', color: '#ccc' }}>
-                  {STYLES_LIST.map(k => <option key={k} value={k}>{STYLE_LABELS[k]}</option>)}
-                </select>
-              </div>
-              <div>
-                <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Durée</div>
-                <div className="flex gap-1 flex-wrap">
-                  {DURATIONS_LIST.map(k => (
-                    <button key={k} onClick={() => setSettingDuration(k)}
-                      className="py-1 rounded text-[9px] font-semibold px-1.5"
-                      style={{
-                        background: settingDuration === k ? S.accent + '20' : '#0a0a0a',
-                        border: `1px solid ${settingDuration === k ? S.accent + '60' : '#222'}`,
-                        color: settingDuration === k ? S.accent : '#555',
-                      }}>
-                      {DURATION_LABELS[k]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Format</div>
-                <div className="flex gap-1">
-                  {RATIOS_LIST.map(k => (
-                    <button key={k} onClick={() => setSettingRatio(k)}
-                      className="flex-1 py-1.5 rounded text-[9px] font-semibold"
-                      style={{
-                        background: settingRatio === k ? S.accent + '20' : '#0a0a0a',
-                        border: `1px solid ${settingRatio === k ? S.accent + '60' : '#222'}`,
-                        color: settingRatio === k ? S.accent : '#555',
-                      }}>
-                      {RATIO_LABELS[k]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <button onClick={handleSaveSettings} disabled={savingSettings}
-                className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded text-xs font-semibold disabled:opacity-40"
-                style={{ background: S.accent, color: '#000' }}>
-                {savingSettings ? <Loader2 size={11} className="animate-spin" /> : null} Sauvegarder
-              </button>
-
-              {/* ── Social accounts ── */}
-              <div>
-                <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: '#555' }}>Comptes sociaux</div>
-                <p className="text-[9px] mb-2" style={{ color: '#444' }}>
-                  Gérez vos comptes dans{' '}
-                  <span style={{ color: S.accent }}>Paramètres → Comptes connectés</span>
-                </p>
-                <div className="flex flex-col gap-1">
-                  {(Object.keys(PLATFORM_CONFIG) as SocialPlatform[]).map(pl => {
-                    const cfg = PLATFORM_CONFIG[pl]
-                    const accs = socialAccounts.filter(a => a.platform === pl)
-                    return (
-                      <div key={pl} className="flex items-center gap-2 px-2 py-1.5 rounded" style={{ background: '#0e0e0e', border: '1px solid #1e1e1e' }}>
-                        <span style={{ fontSize: 11 }}>{cfg.emoji}</span>
-                        <span className="text-[9px] font-semibold flex-1" style={{ color: '#999' }}>{cfg.label}</span>
-                        {accs.length > 0 ? (
-                          <span className="text-[8px] px-1.5 py-0.5 rounded" style={{ background: '#4ade8015', color: '#4ade80', border: '1px solid #4ade8030' }}>
-                            {accs.length} compte{accs.length > 1 ? 's' : ''}
-                          </span>
-                        ) : (
-                          <span className="text-[8px]" style={{ color: '#333' }}>—</span>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
+            <SettingsPanelContent
+              settingStyle={settingStyle} setSettingStyle={setSettingStyle}
+              settingDuration={settingDuration} setSettingDuration={setSettingDuration}
+              settingRatio={settingRatio} setSettingRatio={setSettingRatio}
+              savingSettings={savingSettings} handleSaveSettings={handleSaveSettings}
+              socialAccounts={socialAccounts}
+            />
           </div>
         )}
       </div>
     </div>
+
+    {/* ── Settings panel: mobile bottom sheet — Portal into document.body bypasses all CSS containment ── */}
+    {showSettings && isMobile && createPortal(
+      <>
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(0,0,0,0.65)' }}
+          onClick={() => setShowSettings(false)}
+        />
+        <div style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
+          background: '#161616', border: '1px solid #2e2e2e',
+          maxHeight: '85vh', boxShadow: '0 -8px 32px rgba(0,0,0,0.85)',
+          overflow: 'hidden', borderRadius: '16px 16px 0 0',
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8, paddingBottom: 4, cursor: 'pointer', flexShrink: 0 }}
+            onClick={() => setShowSettings(false)}>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: '#444' }} />
+          </div>
+          <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Settings2 size={12} style={{ color: '#888' }} />
+              <span style={{ fontSize: 14, fontWeight: 600, color: '#ccc' }}>Paramètres</span>
+            </div>
+            <button onClick={() => setShowSettings(false)} style={{ color: '#666', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+              <XCircle size={18} />
+            </button>
+          </div>
+          <SettingsPanelContent
+            settingStyle={settingStyle} setSettingStyle={setSettingStyle}
+            settingDuration={settingDuration} setSettingDuration={setSettingDuration}
+            settingRatio={settingRatio} setSettingRatio={setSettingRatio}
+            savingSettings={savingSettings} handleSaveSettings={handleSaveSettings}
+            socialAccounts={socialAccounts}
+          />
+        </div>
+      </>,
+      document.body
+    )}
 
     {/* ── Floating panels ────────────────────────────────────────────── */}
     {showEffectsModal && (
@@ -2297,13 +2534,26 @@ export default function MontageEditor() {
 
     {showLyricsModal && (
       <DraggableModal title="Paroles & Transcription" icon={<Type size={12} />}
-        onClose={() => setShowLyricsModal(false)} defaultPos={{ x: 640, y: 72 }} defaultSize={{ w: 390, h: 610 }}>
-        <div className="flex flex-col gap-4">
-          {/* Transcription */}
+        onClose={() => setShowLyricsModal(false)} defaultPos={{ x: 640, y: 72 }} defaultSize={{ w: 420, h: 660 }}>
+        {/* ── Tab bar ── */}
+        <div className="-mx-3 -mt-3 flex sticky top-0 z-10 border-b mb-3 shrink-0" style={{ background: '#141414', borderColor: '#222' }}>
+          {(['segments', 'style'] as const).map(t => (
+            <button key={t} onClick={() => setLyricsTab(t)}
+              className="flex-1 py-2.5 text-[10px] font-semibold uppercase tracking-wider"
+              style={{ color: lyricsTab === t ? S.accent : '#444', borderBottom: lyricsTab === t ? `2px solid ${S.accent}` : '2px solid transparent', background: 'none', cursor: 'pointer' }}>
+              {t === 'segments' ? '🎵 Paroles' : '🎨 Style'}
+            </button>
+          ))}
+        </div>
+
+        {/* ══ PAROLES TAB ══ */}
+        {lyricsTab === 'segments' && (
+        <div className="flex flex-col gap-3">
+          {/* Transcription (Whisper) */}
           <div className="rounded p-3" style={{ background: '#111', border: '1px solid #222' }}>
             <div className="flex items-center gap-1.5 mb-2">
               <Mic size={11} style={{ color: S.accent }} />
-              <span className="text-[10px] font-semibold" style={{ color: '#ccc' }}>Transcription locale (Whisper)</span>
+              <span className="text-[10px] font-semibold" style={{ color: '#ccc' }}>Transcription (Whisper)</span>
             </div>
 
             {/* Language + model selectors */}
@@ -2312,7 +2562,7 @@ export default function MontageEditor() {
                 <div className="text-[8px] uppercase tracking-wider mb-1" style={{ color: '#555' }}>Langue</div>
                 <select value={transcriptLang} onChange={e => setTranscriptLang(e.target.value)}
                   className="w-full px-1.5 py-1 rounded text-[9px] outline-none"
-                  style={{ background: '#111', border: '1px solid #2e2e2e', color: '#ccc' }}>
+                  style={{ background: '#0a0a0a', border: '1px solid #2e2e2e', color: '#ccc' }}>
                   <option value="">Auto-détect</option>
                   <option value="fr">Français</option>
                   <option value="en">English</option>
@@ -2330,97 +2580,161 @@ export default function MontageEditor() {
                 <div className="text-[8px] uppercase tracking-wider mb-1" style={{ color: '#555' }}>Modèle</div>
                 <select value={transcriptModel} onChange={e => setTranscriptModel(e.target.value)}
                   className="w-full px-1.5 py-1 rounded text-[9px] outline-none"
-                  style={{ background: '#111', border: '1px solid #2e2e2e', color: '#ccc' }}>
+                  style={{ background: '#0a0a0a', border: '1px solid #2e2e2e', color: '#ccc' }}>
                   <option value="tiny">Tiny (rapide)</option>
                   <option value="base">Base</option>
                   <option value="small">Small ✓</option>
-                  <option value="medium">Medium (lent)</option>
-                  <option value="large-v3">Large v3 (très lent)</option>
+                  <option value="medium">Medium</option>
+                  <option value="large-v3-turbo">Large Turbo (recommandé)</option>
+                  <option value="large-v3">Large v3 (max précision)</option>
                 </select>
               </div>
             </div>
-
-            {transcriptSegments ? (
-              <div className="flex flex-col gap-0.5 overflow-y-auto mb-2" style={{ maxHeight: 160 }}>
-                {transcriptSegments.map((seg, i) => (
-                  <div key={i} className="flex gap-1.5 items-center text-[9px] group">
-                    <span className="shrink-0 font-mono tabular-nums" style={{ color: '#555', minWidth: 32 }}>{fmt(seg.start)}</span>
-                    {editingSegIdx === i ? (
-                      <input
-                        autoFocus
-                        className="flex-1 px-1 rounded outline-none text-[9px]"
-                        style={{ background: '#1e1e1e', border: '1px solid #f0a83060', color: '#eee', minWidth: 0 }}
-                        defaultValue={seg.text}
-                        onBlur={e => {
-                          const updated = [...transcriptSegments]
-                          updated[i] = { ...seg, text: e.target.value }
-                          setTranscriptSegments(updated)
-                          setEditingSegIdx(null)
-                        }}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-                          if (e.key === 'Escape') setEditingSegIdx(null)
-                        }}
-                      />
-                    ) : (
-                      <span
-                        className="flex-1 cursor-text rounded px-1 hover:bg-white/5"
-                        style={{ color: '#bbb' }}
-                        title="Cliquer pour modifier"
-                        onClick={() => setEditingSegIdx(i)}>
-                        {seg.text}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-[9px] mb-2" style={{ color: '#555' }}>
-                Spécifie la langue pour de meilleurs résultats.{' '}
-                <span style={{ color: '#4a4a4a' }}>Installe <code className="font-mono">demucs</code> pour isoler la voix.</span>
-              </p>
-            )}
             <button onClick={handleTranscribe} disabled={!project.audioPath || transcribing}
               className="flex items-center gap-1.5 px-2 py-1.5 rounded text-[10px] font-semibold disabled:opacity-40 w-full justify-center"
               style={{ background: S.accent + '15', border: `1px solid ${S.accent}40`, color: S.accent }}>
               {transcribing ? <Loader2 size={10} className="animate-spin" /> : <Mic size={10} />}
-              {transcriptSegments ? 'Relancer' : 'Transcrire l\'audio'}
+              {transcribing ? 'Transcription…' : transcriptSegments ? 'Relancer Whisper' : 'Transcrire l\'audio'}
             </button>
-            {transcriptSegments && transcriptSegments.length > 0 && workspace && (
-              <button
-                onClick={async () => {
-                  try {
-                    const style = {
-                      color: subtitleColor,
-                      bgColor: subtitleBgColor,
-                      bgOpacity: subtitleBgOpacity,
-                      position: subtitlePos,
-                      customX: subtitleCustomX,
-                      customY: subtitleCustomY,
-                      fontSize: subtitleFontSize,
-                      effect: subtitleEffect,
-                      effectColor: subtitleEffectColor,
-                    }
-                    // 1. Save segments + style to DB
-                    await montageApi.saveSubtitles(workspace.id, project.id, transcriptSegments, style)
-                    setShowLyricsModal(false)
-                    // 2. If the video is already rendered, burn subtitles onto it
-                    //    (quick FFmpeg pass — no re-analysis of clips)
-                    if (project.status === 'COMPLETED') {
-                      await montageApi.burnSubtitles(workspace.id, project.id)
-                      // The server marks the project as PROCESSING then COMPLETED once done.
-                      // Resume the normal status polling so the UI updates automatically.
-                      setGenerating(true)
-                      startPolling(workspace.id, project.id)
-                    }
-                  } catch (e: unknown) { alert((e as Error).message) }
-                }}
-                className="flex items-center gap-1.5 px-2 py-1.5 rounded text-[10px] font-semibold w-full justify-center mt-1"
-                style={{ background: '#6a5acd22', border: '1px solid #6a5acd50', color: '#9b7ef8' }}>
-                <Type size={10} /> Appliquer &amp; sauvegarder
-              </button>
+          </div>
+
+          {/* ── Segments editor ── */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="text-[9px] uppercase tracking-wider" style={{ color: '#555' }}>
+                Segments {transcriptSegments ? `(${transcriptSegments.length})` : ''}
+              </div>
+              <div className="flex gap-1">
+                {transcriptSegments && transcriptSegments.length > 0 && (
+                  <button
+                    onClick={() => setTranscriptSegments(null)}
+                    className="text-[8px] px-1.5 py-0.5 rounded"
+                    style={{ color: '#555', border: '1px solid #2a2a2a', background: 'none', cursor: 'pointer' }}>
+                    Effacer
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    const lastEnd = transcriptSegments?.at(-1)?.end ?? 0
+                    setTranscriptSegments(prev => [...(prev ?? []), { start: lastEnd, end: +(lastEnd + 3).toFixed(2), text: '' }])
+                  }}
+                  className="text-[8px] px-1.5 py-0.5 rounded flex items-center gap-0.5"
+                  style={{ color: S.accent, border: `1px solid ${S.accent}40`, background: S.accent + '10', cursor: 'pointer' }}>
+                  <Plus size={8} /> Ajouter
+                </button>
+              </div>
+            </div>
+
+            {transcriptSegments && transcriptSegments.length > 0 ? (
+              <div className="flex flex-col gap-0.5 overflow-y-auto" style={{ maxHeight: 220 }}>
+                {transcriptSegments.map((seg, i) => {
+                  const fmtT = (s: number) => { const m = Math.floor(s / 60); return `${m}:${(s % 60).toFixed(1).padStart(4, '0')}` }
+                  const parseT = (str: string) => { const p = str.split(':'); return Math.max(0, p.length === 2 ? parseFloat(p[0]) * 60 + parseFloat(p[1]) : parseFloat(str) || 0) }
+                  const hue = (i * 53 + 200) % 360
+                  return (
+                    <div key={i} className="flex items-center gap-1 px-2 py-1.5 rounded group"
+                      style={{ background: `hsla(${hue},28%,11%,0.9)`, border: `1px solid hsla(${hue},38%,22%,0.8)` }}>
+                      <input
+                        key={`s-${i}-${seg.start.toFixed(1)}`}
+                        className="rounded text-[9px] font-mono outline-none text-center"
+                        style={{ width: 46, background: '#0a0a0a', border: '1px solid #2a2a2a', color: '#888', padding: '2px 3px' }}
+                        defaultValue={fmtT(seg.start)}
+                        onBlur={e => { const t = parseT(e.target.value); const u = [...transcriptSegments]; u[i] = { ...seg, start: t }; setTranscriptSegments(u); e.target.value = fmtT(t) }}
+                        onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                      />
+                      <span style={{ color: '#333', fontSize: 9, flexShrink: 0 }}>→</span>
+                      <input
+                        key={`e-${i}-${seg.end.toFixed(1)}`}
+                        className="rounded text-[9px] font-mono outline-none text-center"
+                        style={{ width: 46, background: '#0a0a0a', border: '1px solid #2a2a2a', color: '#888', padding: '2px 3px' }}
+                        defaultValue={fmtT(seg.end)}
+                        onBlur={e => { const t = parseT(e.target.value); const u = [...transcriptSegments]; u[i] = { ...seg, end: t }; setTranscriptSegments(u); e.target.value = fmtT(t) }}
+                        onKeyDown={e => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                      />
+                      <input
+                        className="flex-1 rounded text-[9px] outline-none min-w-0"
+                        style={{ background: '#0f0f0f', border: '1px solid #2a2a2a', color: '#ccc', padding: '2px 5px' }}
+                        value={seg.text}
+                        onChange={e => { const u = [...transcriptSegments]; u[i] = { ...seg, text: e.target.value }; setTranscriptSegments(u) }}
+                        placeholder="Paroles…"
+                      />
+                      <button
+                        onClick={() => setTranscriptSegments(prev => prev ? prev.filter((_, idx) => idx !== i) : prev)}
+                        className="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 rounded"
+                        style={{ color: '#555', background: 'none', border: 'none', cursor: 'pointer' }}
+                        onMouseEnter={e => (e.currentTarget.style.color = S.red)}
+                        onMouseLeave={e => (e.currentTarget.style.color = '#555')}>
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center py-6 rounded text-[10px]"
+                style={{ background: '#0d0d0d', border: '1px dashed #222', color: '#444' }}>
+                Aucun segment — cliquez "Ajouter" ou transcrivez l'audio
+              </div>
             )}
           </div>
+
+          {/* ── Paste / import lyrics ── */}
+          <div className="rounded p-3" style={{ background: '#111', border: '1px solid #222' }}>
+            <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Coller des paroles</div>
+            <textarea
+              value={pasteText}
+              onChange={e => setPasteText(e.target.value)}
+              rows={4}
+              placeholder="Collez vos paroles ici (une ligne = un segment)…"
+              className="w-full px-2 py-1.5 rounded text-[9px] outline-none resize-none"
+              style={{ background: '#0a0a0a', border: '1px solid #2a2a2a', color: '#ccc', fontFamily: 'monospace' }}
+            />
+            <button
+              disabled={!pasteText.trim()}
+              onClick={() => {
+                const lines = pasteText.trim().split('\n').map(l => l.trim()).filter(Boolean)
+                const duration = project.audioDuration ?? lines.length * 3
+                const segDur = duration / lines.length
+                const segs = lines.map((text, i) => ({ start: +(i * segDur).toFixed(2), end: +((i + 1) * segDur).toFixed(2), text }))
+                setTranscriptSegments(prev => prev ? [...prev, ...segs] : segs)
+                setPasteText('')
+              }}
+              className="flex items-center gap-1.5 mt-1.5 px-2 py-1.5 rounded text-[9px] font-semibold w-full justify-center disabled:opacity-40"
+              style={{ background: '#6a5acd22', border: '1px solid #6a5acd50', color: '#9b7ef8', cursor: 'pointer' }}>
+              <Type size={10} /> Importer & diviser
+            </button>
+          </div>
+
+          {/* ── Apply & save ── */}
+          {transcriptSegments && transcriptSegments.length > 0 && workspace && (
+            <button
+              onClick={async () => {
+                try {
+                  const style = {
+                    color: subtitleColor, bgColor: subtitleBgColor, bgOpacity: subtitleBgOpacity,
+                    position: subtitlePos, customX: subtitleCustomX, customY: subtitleCustomY,
+                    fontSize: subtitleFontSize, effect: subtitleEffect, effectColor: subtitleEffectColor,
+                  }
+                  await montageApi.saveSubtitles(workspace.id, project.id, transcriptSegments, style)
+                  setShowLyricsModal(false)
+                  if (project.status === 'COMPLETED') {
+                    await montageApi.burnSubtitles(workspace.id, project.id)
+                    setGenerating(true)
+                    startPolling(workspace.id, project.id)
+                  }
+                } catch (e: unknown) { alert((e as Error).message) }
+              }}
+              className="flex items-center gap-1.5 px-2 py-2 rounded text-[10px] font-semibold w-full justify-center"
+              style={{ background: S.accent, color: '#000', cursor: 'pointer' }}>
+              <Type size={10} /> Appliquer &amp; sauvegarder
+            </button>
+          )}
+        </div>
+        )}
+
+        {/* ══ STYLE TAB ══ */}
+        {lyricsTab === 'style' && (
+        <div className="flex flex-col gap-4">
           {/* Police */}
           <div>
             <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Police</div>
@@ -2434,19 +2748,52 @@ export default function MontageEditor() {
               ))}
             </div>
           </div>
-          {/* Effet d'entrée */}
+
+          {/* Effet d'entrée — with live Aa preview on hover */}
           <div>
             <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Effet d&apos;entrée</div>
             <div className="grid gap-1" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
-              {SUBTITLE_EFFECTS.map(e => (
-                <button key={e.id} onClick={() => setSubtitleEffect(e.id)}
-                  className="py-1.5 rounded text-[9px] font-semibold"
-                  style={{ background: subtitleEffect === e.id ? S.accent + '15' : '#111', border: `1px solid ${subtitleEffect === e.id ? S.accent + '50' : '#222'}`, color: subtitleEffect === e.id ? S.accent : '#666' }}>
-                  {e.label}
-                </button>
-              ))}
+              {SUBTITLE_EFFECTS.map(e => {
+                const isSel = subtitleEffect === e.id
+                const ANIM_CSS: Record<string, string> = {
+                  FADE: 'subFadeIn 0.25s ease forwards',
+                  SLIDE_UP: 'subSlideUp 0.28s ease forwards',
+                  SLIDE_DOWN: 'subSlideDown 0.28s ease forwards',
+                  POP: 'subPop 0.32s cubic-bezier(.36,.07,.19,.97) forwards',
+                  BOUNCE: 'subBounce 0.45s ease forwards',
+                  NEON: 'subNeon 1.2s ease infinite',
+                }
+                const STATIC_STYLE: Record<string, CSSProperties> = {
+                  GLOW: { textShadow: `0 0 8px ${subtitleEffectColor}, 0 0 22px ${subtitleEffectColor}cc` },
+                  NEON: { textShadow: `0 0 4px #fff, 0 0 11px #fff, 0 0 22px ${subtitleEffectColor}` },
+                  OUTLINE: { WebkitTextStroke: `1.5px ${isSel ? S.accent : '#888'}`, color: 'transparent' },
+                  SHADOW: { textShadow: `2px 2px 0 ${subtitleEffectColor}f0` },
+                  KARAOKE: { background: `linear-gradient(to right, ${isSel ? S.accent : '#888'} 50%, #444 50%)`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' },
+                  TYPEWRITER: { borderRight: `1.5px solid ${isSel ? S.accent : '#888'}` },
+                }
+                return (
+                  <button key={e.id}
+                    onClick={() => setSubtitleEffect(e.id)}
+                    onMouseEnter={() => setEffectAnimKeys(prev => ({ ...prev, [e.id]: (prev[e.id] ?? 0) + 1 }))}
+                    className="rounded flex flex-col items-center gap-0.5 pt-2 pb-1.5 px-1"
+                    style={{ background: isSel ? S.accent + '15' : '#111', border: `1px solid ${isSel ? S.accent + '50' : '#222'}`, cursor: 'pointer' }}>
+                    {/* Live Aa preview — key changes on hover to restart animation */}
+                    <span
+                      key={effectAnimKeys[e.id] ?? 0}
+                      style={{
+                        fontSize: '0.78rem', fontWeight: 800, lineHeight: 1.1, display: 'inline-block',
+                        color: isSel ? S.accent : '#888',
+                        animation: ANIM_CSS[e.id] ?? undefined,
+                        ...(STATIC_STYLE[e.id] ?? {}),
+                      }}>
+                      Aa
+                    </span>
+                    <span className="text-[8px] font-semibold" style={{ color: isSel ? S.accent : '#555' }}>{e.label}</span>
+                  </button>
+                )
+              })}
             </div>
-            {/* Couleur d'effet — visible seulement pour les effets avec rendu coloré */}
+            {/* Effect accent color */}
             {['GLOW', 'NEON', 'OUTLINE', 'SHADOW'].includes(subtitleEffect) && (
               <div className="mt-2 pt-2" style={{ borderTop: '1px solid #222' }}>
                 <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>
@@ -2459,17 +2806,18 @@ export default function MontageEditor() {
                   {subtitleEffect === 'SHADOW'
                     ? ['#000000', '#1a0030', '#001a30', '#300000', '#0a0a0a'].map(c => (
                         <button key={c} onClick={() => setSubtitleEffectColor(c)} className="rounded-full"
-                          style={{ width: 14, height: 14, background: c, border: subtitleEffectColor === c ? `2px solid ${S.accent}` : '2px solid #444', flexShrink: 0 }} />
+                          style={{ width: 14, height: 14, background: c, border: subtitleEffectColor === c ? `2px solid ${S.accent}` : '2px solid #444', flexShrink: 0, cursor: 'pointer' }} />
                       ))
                     : ['#f0a830', '#ff4444', '#44aaff', '#44ff88', '#ff44ff', '#ffffff', '#00ffff'].map(c => (
                         <button key={c} onClick={() => setSubtitleEffectColor(c)} className="rounded-full"
-                          style={{ width: 14, height: 14, background: c, border: subtitleEffectColor === c ? `2px solid ${S.accent}` : '2px solid transparent', flexShrink: 0 }} />
+                          style={{ width: 14, height: 14, background: c, border: subtitleEffectColor === c ? `2px solid ${S.accent}` : '2px solid transparent', flexShrink: 0, cursor: 'pointer' }} />
                       ))
                   }
                 </div>
               </div>
             )}
           </div>
+
           {/* Position */}
           <div>
             <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Position</div>
@@ -2477,16 +2825,17 @@ export default function MontageEditor() {
               {(['TOP', 'CENTER', 'BOTTOM'] as const).map(pos => (
                 <button key={pos} onClick={() => setSubtitlePos(pos)}
                   className="flex-1 py-1.5 rounded text-[9px] font-semibold"
-                  style={{ background: subtitlePos === pos ? S.accent + '15' : '#111', border: `1px solid ${subtitlePos === pos ? S.accent + '50' : '#222'}`, color: subtitlePos === pos ? S.accent : '#555' }}>
+                  style={{ background: subtitlePos === pos ? S.accent + '15' : '#111', border: `1px solid ${subtitlePos === pos ? S.accent + '50' : '#222'}`, color: subtitlePos === pos ? S.accent : '#555', cursor: 'pointer' }}>
                   {pos === 'TOP' ? '▲ Haut' : pos === 'CENTER' ? '● Centre' : '▼ Bas'}
                 </button>
               ))}
             </div>
             <p className="text-[8px] leading-relaxed" style={{ color: '#444' }}>
-              💡 Glisse les sous-titres directement sur la vidéo pour les repositionner librement.
+              💡 Glisse les sous-titres sur la vidéo pour les repositionner librement.
               {subtitlePos === 'CUSTOM' && <span style={{ color: S.accent }}> ({Math.round(subtitleCustomX)}%, {Math.round(subtitleCustomY)}%)</span>}
             </p>
           </div>
+
           {/* Taille */}
           <div>
             <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Taille</div>
@@ -2497,9 +2846,10 @@ export default function MontageEditor() {
                 className="flex-1 cursor-pointer" style={{ accentColor: S.accent, height: 2 }} />
               <span className="text-[9px] shrink-0" style={{ color: '#aaa', fontSize: '1.1em', fontWeight: 700 }}>A</span>
               <span className="text-[9px] font-mono w-8 text-right" style={{ color: '#666' }}>{subtitleFontSize}%</span>
-              <button onClick={() => setSubtitleFontSize(100)} className="text-[8px] px-1 rounded" style={{ color: '#555', border: '1px solid #2a2a2a' }}>reset</button>
+              <button onClick={() => setSubtitleFontSize(100)} className="text-[8px] px-1 rounded" style={{ color: '#555', border: '1px solid #2a2a2a', background: 'none', cursor: 'pointer' }}>reset</button>
             </div>
           </div>
+
           {/* Couleur du texte */}
           <div>
             <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Couleur du texte</div>
@@ -2509,14 +2859,14 @@ export default function MontageEditor() {
               <span className="text-[10px] font-mono" style={{ color: '#666' }}>{subtitleColor}</span>
               {['#FFFFFF', '#FFE500', '#FF4444', '#44FF88', '#44AAFF', '#FF69B4', '#FF8C00'].map(c => (
                 <button key={c} onClick={() => setSubtitleColor(c)} className="rounded-full"
-                  style={{ width: 14, height: 14, background: c, border: subtitleColor === c ? `2px solid ${S.accent}` : '2px solid transparent', flexShrink: 0 }} />
+                  style={{ width: 14, height: 14, background: c, border: subtitleColor === c ? `2px solid ${S.accent}` : '2px solid transparent', flexShrink: 0, cursor: 'pointer' }} />
               ))}
             </div>
           </div>
+
           {/* Fond */}
           <div>
             <div className="text-[9px] uppercase tracking-wider mb-1.5" style={{ color: '#555' }}>Fond</div>
-            {/* Transparent shortcut */}
             <button
               onClick={() => setSubtitleBgOpacity(0)}
               className="mb-1.5 px-2 py-1 rounded text-[9px] font-semibold w-full"
@@ -2525,7 +2875,7 @@ export default function MontageEditor() {
                 border: `1px solid ${subtitleBgOpacity === 0 ? '#f0a83060' : '#2a2a2a'}`,
                 color: subtitleBgOpacity === 0 ? S.accent : '#555',
                 backgroundImage: subtitleBgOpacity === 0 ? 'none' : 'repeating-conic-gradient(#2a2a2a 0% 25%, transparent 0% 50%)',
-                backgroundSize: '10px 10px',
+                backgroundSize: '10px 10px', cursor: 'pointer',
               }}>
               ⊘ Transparent (sans fond)
             </button>
@@ -2535,7 +2885,7 @@ export default function MontageEditor() {
               <span className="text-[10px] font-mono" style={{ color: '#666' }}>{subtitleBgColor}</span>
               {['#000000', '#FFFFFF', '#1a1a1a', '#0d0d44', '#440000'].map(c => (
                 <button key={c} onClick={() => { setSubtitleBgColor(c); if (subtitleBgOpacity === 0) setSubtitleBgOpacity(42) }} className="rounded-full"
-                  style={{ width: 14, height: 14, background: c, border: subtitleBgColor === c && subtitleBgOpacity > 0 ? `2px solid ${S.accent}` : '2px solid #333', flexShrink: 0 }} />
+                  style={{ width: 14, height: 14, background: c, border: subtitleBgColor === c && subtitleBgOpacity > 0 ? `2px solid ${S.accent}` : '2px solid #333', flexShrink: 0, cursor: 'pointer' }} />
               ))}
             </div>
             <div className="flex items-center gap-2">
@@ -2546,6 +2896,7 @@ export default function MontageEditor() {
             </div>
           </div>
         </div>
+        )}
       </DraggableModal>
     )}
 
@@ -2569,17 +2920,23 @@ export default function MontageEditor() {
               </button>
             </div>
           ) : (
-            <div className="grid gap-1" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+            <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
               {sceneFrames.map(frame => (
-                <div key={frame.id} className="rounded overflow-hidden relative group cursor-pointer"
-                  style={{ background: '#111', border: '1px solid #222', aspectRatio: '16/9' }}>
+                <button key={frame.id}
+                  onClick={() => handleAddFrameAsClip(frame)}
+                  className="rounded overflow-hidden relative group cursor-pointer text-left"
+                  style={{ background: '#111', border: '1px solid #222', aspectRatio: '16/9', display: 'block', padding: 0, WebkitTapHighlightColor: 'transparent' }}>
                   <img src={frame.url} alt={`frame ${frame.time.toFixed(1)}s`}
                     className="w-full h-full object-cover" style={{ display: 'block' }} />
-                  <div className="absolute bottom-0 left-0 right-0 px-1 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                    style={{ background: 'rgba(0,0,0,0.75)' }}>
+                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ background: 'rgba(0,0,0,0.5)' }}>
+                    <span className="text-[9px] font-semibold px-2 py-0.5 rounded" style={{ background: S.accent, color: '#000' }}>+ Ajouter</span>
+                  </div>
+                  <div className="absolute bottom-0 left-0 right-0 px-1 py-0.5"
+                    style={{ background: 'rgba(0,0,0,0.6)' }}>
                     <span className="text-[7px] font-mono" style={{ color: '#aaa' }}>{frame.time.toFixed(1)}s</span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           )}

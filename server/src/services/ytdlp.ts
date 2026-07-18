@@ -4,6 +4,18 @@ import fs from 'fs'
 import https from 'https'
 import http from 'http'
 
+/** Resolve yt-dlp binary: prefer venv, then PATH */
+function ytdlpBin(): string {
+  const candidates = [
+    '/var/www/vibot/.venv/bin/yt-dlp',
+    path.join(process.env.VIRTUAL_ENV ?? '', 'bin', 'yt-dlp'),
+  ].filter(Boolean)
+  for (const p of candidates) {
+    try { if (fs.statSync(p).isFile()) return p } catch {}
+  }
+  return 'yt-dlp' // fallback to PATH
+}
+
 /** Returns ['--cookies', '/path'] if YTDLP_COOKIES_PATH is set and the file exists */
 function cookiesArgs(): string[] {
   const p = process.env.YTDLP_COOKIES_PATH
@@ -12,13 +24,39 @@ function cookiesArgs(): string[] {
 }
 
 /**
- * Use Android + web embedded clients for YouTube — bypasses the
- * "Sign in to confirm you're not a bot" error without needing cookies.
- * Safe to always include: yt-dlp applies extractor-args only to matching URLs.
+ * Returns cookies args for Instagram — uses INSTAGRAM_COOKIES_PATH env var,
+ * falling back to YTDLP_COOKIES_PATH (the same cookies file may contain instagram.com cookies).
  */
-const YT_BYPASS_ARGS = [
-  '--extractor-args', 'youtube:player_client=android,web',
+function instagramCookiesArgs(): string[] {
+  const p = process.env.INSTAGRAM_COOKIES_PATH ?? process.env.YTDLP_COOKIES_PATH
+  if (p && fs.existsSync(p)) return ['--cookies', p]
+  return []
+}
+
+/**
+ * Use Node.js for YouTube signature solving (required since yt-dlp 2025).
+ * --remote-components ejs:github downloads the EJS challenge solver from GitHub on first use.
+ * Without this, yt-dlp fails to decrypt YouTube stream URLs (signature challenge).
+ */
+const JS_RUNTIME_ARGS = [
+  '--js-runtimes', 'node:/usr/bin/node',
+  '--remote-components', 'ejs:github',
 ]
+
+/** Legacy bypass args — kept for non-YouTube platforms */
+const YT_BYPASS_ARGS: string[] = []
+
+/** If YTDLP_PROXY is set (e.g. socks5://user:pass@host:port or http://...), route yt-dlp through it */
+function proxyArgs(): string[] {
+  const p = process.env.YTDLP_PROXY
+  return p ? ['--proxy', p] : []
+}
+
+/** TikTok requires browser impersonation to bypass 403 blocks */
+function tiktokArgs(url: string): string[] {
+  if (!/tiktok\.com/i.test(url)) return []
+  return ['--impersonate', 'chrome-133', '--extractor-args', 'tiktok:app_name=trill']
+}
 
 export interface YtdlpMeta {
   id: string
@@ -66,13 +104,17 @@ export async function getYouTubeOembedMeta(url: string): Promise<YtdlpMeta | nul
 
 /** Fetch metadata without downloading */
 export function getYtdlpMeta(url: string): Promise<YtdlpMeta> {
+  const isInstagram = /instagram\.com/i.test(url)
   return new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', [
+    const proc = spawn(ytdlpBin(), [
       '--dump-json',
       '--no-playlist',
       '--no-warnings',
+      ...JS_RUNTIME_ARGS,
       ...YT_BYPASS_ARGS,
-      ...cookiesArgs(),
+      ...tiktokArgs(url),
+      ...proxyArgs(),
+      ...(isInstagram ? instagramCookiesArgs() : cookiesArgs()),
       url,
     ], { stdio: ['ignore', 'pipe', 'pipe'] })
 
@@ -95,6 +137,7 @@ export function getYtdlpMeta(url: string): Promise<YtdlpMeta> {
 
 /** Download and extract audio to MP3 at outputPath (without extension — yt-dlp appends .mp3) */
 export function downloadAudioYtdlp(url: string, outputPath: string): Promise<string> {
+  const isInstagram = /instagram\.com/i.test(url)
   return new Promise((resolve, reject) => {
     // yt-dlp replaces the extension; pass path without .mp3 so we know the final name
     const base = outputPath.replace(/\.mp3$/i, '')
@@ -102,20 +145,23 @@ export function downloadAudioYtdlp(url: string, outputPath: string): Promise<str
       url,
       '-x',
       '--audio-format', 'mp3',
-      '--audio-quality', '0',
+      '--audio-quality', '192K',
+      '--ffmpeg-location', '/usr/bin',
       '-o', `${base}.%(ext)s`,
       '--no-playlist',
       '--no-part',
       '--no-continue',
       '--no-warnings',
-      '--compat-options', 'allow-unsafe-ext',
       '--retries', '2',
       '--extractor-retries', '2',
+      ...JS_RUNTIME_ARGS,
       ...YT_BYPASS_ARGS,
-      ...cookiesArgs(),
+      ...tiktokArgs(url),
+      ...proxyArgs(),
+      ...(isInstagram ? instagramCookiesArgs() : cookiesArgs()),
     ]
 
-    const proc = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn(ytdlpBin(), args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let err = ''
     proc.stderr.on('data', (d: Buffer) => { err += d.toString() })
 
@@ -152,6 +198,7 @@ export function detectPlatform(url: string): 'tiktok' | 'instagram' | 'twitter' 
  *                      existed in destDir and is not detected as "new").
  */
 export function downloadVideoYtdlp(url: string, destDir: string, uniquePrefix?: string): Promise<string[]> {
+  const isInstagram = /instagram\.com/i.test(url)
   return new Promise((resolve, reject) => {
     fs.mkdirSync(destDir, { recursive: true })
     const before = new Set(fs.readdirSync(destDir))
@@ -175,15 +222,17 @@ export function downloadVideoYtdlp(url: string, destDir: string, uniquePrefix?: 
       '--no-playlist',
       // Bypass any user yt-dlp config that might add --no-overwrites or other flags
       '--ignore-config',
-      '--compat-options', 'allow-unsafe-ext',
       '--retries', '3',
       '--extractor-retries', '3',
       '--socket-timeout', '30',
+      ...JS_RUNTIME_ARGS,
       ...YT_BYPASS_ARGS,
-      ...cookiesArgs(),
+      ...tiktokArgs(url),
+      ...proxyArgs(),
+      ...(isInstagram ? instagramCookiesArgs() : cookiesArgs()),
     ]
 
-    const proc = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn(ytdlpBin(), args, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     // Kill after 10 minutes to prevent infinite hangs
     const timeout = setTimeout(() => {
@@ -281,17 +330,34 @@ export async function downloadSnapchatStories(profileUrl: string, destDir: strin
   // Fetch public profile page
   const html = (await httpGetBuffer(`https://www.snapchat.com/@${username}`)).toString('utf-8')
 
-  // Extract all mediaUrl values (JSON-encoded in the page HTML)
+  // Try to extract media URLs from __NEXT_DATA__ JSON (SPA data embedded in HTML)
   const mediaUrls: string[] = []
-  const re = /"mediaUrl"\s*:\s*"(https:\/\/[^"]+)"/g
-  let match: RegExpExecArray | null
-  while ((match = re.exec(html)) !== null) {
-    // Decode JSON unicode escapes (\u0026 → &, \u003d → =)
-    const mediaUrl = match[1]
-      .replace(/\\u0026/g, '&')
-      .replace(/\\u003[dD]/g, '=')
-      .replace(/\\u003[fF]/g, '?')
-    mediaUrls.push(mediaUrl)
+
+  // Method 1: extract from __NEXT_DATA__ JSON
+  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+  if (nextDataMatch) {
+    try {
+      const nextData = JSON.parse(nextDataMatch[1])
+      const jsonStr = JSON.stringify(nextData)
+      const re = /"mediaUrl"\s*:\s*"(https:\/\/[^"]+)"/g
+      let m: RegExpExecArray | null
+      while ((m = re.exec(jsonStr)) !== null) {
+        const url = m[1]
+          .replace(/\\u0026/g, '&').replace(/\\u003[dD]/g, '=').replace(/\\u003[fF]/g, '?')
+        if (!mediaUrls.includes(url)) mediaUrls.push(url)
+      }
+    } catch { /* continue to next method */ }
+  }
+
+  // Method 2: regex directly in the raw HTML
+  if (mediaUrls.length === 0) {
+    const re = /"mediaUrl"\s*:\s*"(https:\/\/[^"]+)"/g
+    let match: RegExpExecArray | null
+    while ((match = re.exec(html)) !== null) {
+      const url = match[1]
+        .replace(/\\u0026/g, '&').replace(/\\u003[dD]/g, '=').replace(/\\u003[fF]/g, '?')
+      if (!mediaUrls.includes(url)) mediaUrls.push(url)
+    }
   }
 
   if (mediaUrls.length === 0) {

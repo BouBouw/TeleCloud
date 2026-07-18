@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
-import { Link2, Music, Film, Loader2, Check, Download, X, PlayCircle, Clock } from 'lucide-react'
-import { trackApi } from '../lib/api'
+import { Link2, Music, Film, Loader2, Check, Download, X, PlayCircle, Clock, Wifi } from 'lucide-react'
+import { trackApi, tunnelApi } from '../lib/api'
 import type { SocialResult, Track } from '../lib/api'
 
 const S = {
@@ -49,6 +49,8 @@ export default function YouTubeSearch({ workspaceId, onScrapeSuccess, libraryTra
   const [scraping,   setScraping]   = useState(false)
   const [error,      setError]      = useState('')
   const [success,    setSuccess]    = useState('')
+  const [queued,     setQueued]     = useState<{ jobId: string; title: string } | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const inLibrary = preview
@@ -76,10 +78,15 @@ export default function YouTubeSearch({ workspaceId, onScrapeSuccess, libraryTra
       const { result } = await trackApi.resolveSocial(workspaceId, trimmed)
       setPreview(result)
     } catch (e) {
-      setError(String(e).replace('Error: ', ''))
+      const raw = String(e).replace('Error: ', '')
+      setError(raw.includes('Sign in') || raw.includes('bot') ? 'Vidéo non accessible sans connexion YouTube (vidéo privée ou age-restricted).' : raw.split('\n')[0].slice(0, 200))
     } finally {
       setLoading(false)
     }
+  }
+
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
   }
 
   const handleDownload = async () => {
@@ -87,8 +94,37 @@ export default function YouTubeSearch({ workspaceId, onScrapeSuccess, libraryTra
     if (!trimmed) return
     setScraping(true)
     setError('')
+    setQueued(null)
     try {
-      const { track, video, alreadyExists } = await trackApi.scrapeSocial(workspaceId, trimmed, format)
+      const result = await trackApi.scrapeSocial(workspaceId, trimmed, format)
+
+      // Tunnel path: server queued the job for local download
+      if (result.status === 'queued' && result.jobId) {
+        const title = result.meta?.title ?? preview?.title ?? trimmed
+        setQueued({ jobId: result.jobId, title })
+        setScraping(false)
+
+        // Poll every 2s until done or failed
+        pollRef.current = setInterval(async () => {
+          try {
+            const { job } = await tunnelApi.pollJob(result.jobId!)
+            if (job.status === 'done') {
+              stopPolling()
+              setQueued(null)
+              setSuccess(`"${job.result?.title ?? title}" ajouté — ${format === 'MP3' ? 'piste audio' : 'vidéo'} importée`)
+              onScrapeSuccess?.()
+              setTimeout(() => { setSuccess(''); setUrl(''); setPreview(null); inputRef.current?.focus() }, 4000)
+            } else if (job.status === 'failed') {
+              stopPolling()
+              setQueued(null)
+              setError(job.error ?? 'Le tunnel a échoué à télécharger cette vidéo.')
+            }
+          } catch { /* network hiccup, keep polling */ }
+        }, 2000)
+        return
+      }
+
+      const { track, video, alreadyExists } = result
       const name = track?.title ?? video?.title ?? preview?.title ?? trimmed
       setSuccess(alreadyExists
         ? `"${name}" est déjà dans la bibliothèque`
@@ -101,7 +137,14 @@ export default function YouTubeSearch({ workspaceId, onScrapeSuccess, libraryTra
         inputRef.current?.focus()
       }, 4000)
     } catch (e) {
-      setError(String(e).replace('Error: ', ''))
+      const raw = String(e).replace('Error: ', '')
+      setError(
+        raw.includes('Sign in') || raw.includes('bot')
+          ? 'Cette vidéo n\'est pas accessible sans authentification YouTube (vidéo privée, age-restricted ou IP bloquée).'
+          : raw.includes('unavailable') ? 'Vidéo non disponible (supprimée, privée ou géo-bloquée).'
+          : raw.includes('timed out') ? 'Délai dépassé — réessaie dans quelques secondes.'
+          : raw.split('\n')[0].slice(0, 200)
+      )
     } finally {
       setScraping(false)
     }
@@ -254,10 +297,32 @@ export default function YouTubeSearch({ workspaceId, onScrapeSuccess, libraryTra
           </div>
         )}
 
+        {/* Tunnel waiting */}
+        {queued && (
+          <div className="flex flex-col gap-1.5 px-3 py-2.5 rounded text-xs"
+            style={{ background: `${YT_ACCENT}08`, border: `1px solid ${YT_ACCENT}25` }}>
+            <div className="flex items-center gap-2" style={{ color: YT_ACCENT }}>
+              <Wifi size={12} className="shrink-0" />
+              <span className="font-medium">En attente du tunnel local…</span>
+              <Loader2 size={11} className="animate-spin ml-auto" />
+            </div>
+            <p className="text-[10px]" style={{ color: S.textMute }}>
+              Le tunnel télécharge <span className="font-medium" style={{ color: S.text }}>«&nbsp;{queued.title}&nbsp;»</span> sur ta machine
+              avec tes cookies YouTube puis l'envoie ici.
+            </p>
+            <button
+              onClick={() => { stopPolling(); setQueued(null) }}
+              className="flex items-center gap-1 text-[10px] mt-0.5 w-fit"
+              style={{ color: S.textFade }}>
+              <X size={9} /> Annuler
+            </button>
+          </div>
+        )}
+
         {/* Download button */}
         <button
           onClick={handleDownload}
-          disabled={!url.trim() || scraping || !!success}
+          disabled={!url.trim() || scraping || !!success || !!queued}
           className="flex items-center justify-center gap-2 py-2.5 rounded text-sm font-semibold disabled:opacity-40"
           style={{ background: YT_ACCENT, color: '#fff' }}>
           {scraping

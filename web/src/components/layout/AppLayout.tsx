@@ -1,11 +1,13 @@
 ﻿import { createContext, useContext, useState, useEffect } from 'react'
-import { Outlet, Navigate, useLocation } from 'react-router-dom'
+import { Outlet, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import GlobalPlayer from '../player/GlobalPlayer'
 import { usePageMeta } from '../../hooks/usePageMeta'
 import { useAuth } from '../../hooks/useAuth'
-import { wsApi } from '../../lib/api'
+import { notificationActions, useNotifications } from '../../store/notificationsStore'
+import { workspaceActions, useWorkspaces } from '../../store/workspaceStore'
+import NotifToast from '../NotifToast'
 
 interface MobileSidebarCtxType {
   mobileOpen: boolean
@@ -27,17 +29,25 @@ export default function AppLayout() {
   const { title, subtitle } = usePageMeta()
   const { user, loading } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [wsChecked, setWsChecked] = useState(false)
-  const [hasWorkspace, setHasWorkspace] = useState(true)
   const location = useLocation()
+  const navigate = useNavigate()
+  const { latest } = useNotifications()
+  const { workspace, workspaces, loading: wsLoading } = useWorkspaces()
 
+  // Initialise workspace store once after user is known
   useEffect(() => {
     if (!user) return
-    wsApi.list().then(d => {
-      setHasWorkspace(d.workspaces.length > 0)
-      setWsChecked(true)
-    }).catch(() => setWsChecked(true))
+    workspaceActions.init()
+    return () => { notificationActions.disconnect() }
   }, [user])
+
+  // Connect notifications whenever the active workspace changes
+  useEffect(() => {
+    if (workspace) notificationActions.connect(workspace.id)
+  }, [workspace])
+
+  const wsChecked = !wsLoading || user == null
+  const hasWorkspace = workspaces.length > 0
 
   if (loading || (user != null && !wsChecked)) return (
     <div className="flex h-screen items-center justify-center" style={{ background: '#111' }}>
@@ -45,7 +55,10 @@ export default function AppLayout() {
     </div>
   )
   if (!user) return <Navigate to="/login" replace />
-  if (!hasWorkspace && location.pathname !== '/onboarding') return <Navigate to="/onboarding" replace />
+  // Only redirect to onboarding for brand-new users (flag not yet set).
+  // Users who deliberately skipped onboarding (shared-workspace members) must pass through.
+  const alreadyOnboarded = localStorage.getItem('ss_onboarded') === 'true'
+  if (!hasWorkspace && !alreadyOnboarded && location.pathname !== '/onboarding') return <Navigate to="/onboarding" replace />
 
   return (
     <MobileSidebarCtx.Provider value={{ mobileOpen, toggleMobile: () => setMobileOpen(v => !v), closeMobile: () => setMobileOpen(false) }}>
@@ -67,6 +80,8 @@ export default function AppLayout() {
           <GlobalPlayer />
         </div>
       </div>
+      {/* Real-time toast notifications */}
+      {latest && <NotifToast notif={latest} onNavigate={(link) => { navigate(link) }} />}
     </MobileSidebarCtx.Provider>
   )
 }

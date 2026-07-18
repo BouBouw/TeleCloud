@@ -1,10 +1,12 @@
-﻿import { useState, useEffect, useCallback } from 'react'
+﻿import { useState, useEffect, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Bot, Plus, Radio, Power, RefreshCw,
-  Trash2, ExternalLink, Loader2, Hash,
+  Trash2, ExternalLink, Loader2, Hash, Pencil, Check, X, KeyRound,
 } from 'lucide-react'
-import { wsApi, botApi } from '../lib/api'
+import { botApi } from '../lib/api'
 import type { Bot as BotType, Workspace } from '../lib/api'
+import { useWorkspaces } from '../store/workspaceStore'
 import { useI18n } from '../i18n'
 
 /* ─── Design tokens ─── */
@@ -36,14 +38,58 @@ function statusStyle(s: string): React.CSSProperties {
   return                       { color: S.red,   background: 'rgba(231,76,60,0.08)',   border: `1px solid rgba(231,76,60,0.22)`  }
 }
 
+/* ─── Telegram reaction emojis available to bots ─── */
+const TG_REACTIONS = [
+  '👍','👎','❤️','🔥','🥰','👏','😁','🤔','🤯','😱',
+  '🤬','😢','🎉','🤩','💩','🙏','👌','🕊️','🤡','🥱',
+  '🥴','😍','🐳','🌚','🌭','💯','🤣','⚡','🍌','🏆',
+  '💔','🤨','😐','🍓','🍾','💋','😈','😴','😭','🤓',
+  '👻','👀','🎃','😇','😂','🤷',
+]
+
 /* ─── BotCard ─── */
-function BotCard({ bot, onAction, onDelete }: {
+function BotCard({ bot, onAction, onDelete, onUpdate }: {
   bot: BotType
   onAction: (id: string, action: 'start' | 'stop' | 'restart') => void
   onDelete:  (id: string) => void
+  onUpdate:  (id: string, data: { channelId?: string; reaction?: string | null; telegramToken?: string }) => Promise<void>
 }) {
   const { t } = useI18n()
-  const [hovered, setHovered] = useState(false)
+  const [hovered,       setHovered]       = useState(false)
+  const [editingCh,     setEditingCh]     = useState(false)
+  const [newChannelId,  setNewChannelId]  = useState(bot.channelId)
+  const [savingCh,      setSavingCh]      = useState(false)
+  const [editingToken,  setEditingToken]  = useState(false)
+  const [newToken,      setNewToken]      = useState('')
+  const [savingToken,   setSavingToken]   = useState(false)
+  const [showReactions, setShowReactions] = useState(false)
+  const [savingReact,   setSavingReact]   = useState(false)
+  const reactPickerRef = useRef<HTMLDivElement>(null)
+  const triggerRef     = useRef<HTMLButtonElement>(null)
+  const [pickerRect,   setPickerRect]     = useState<{ top: number; right: number } | null>(null)
+
+  // Close picker when clicking outside
+  useEffect(() => {
+    if (!showReactions) return
+    const handler = (e: MouseEvent) => {
+      if (
+        reactPickerRef.current && !reactPickerRef.current.contains(e.target as Node) &&
+        triggerRef.current     && !triggerRef.current.contains(e.target as Node)
+      ) {
+        setShowReactions(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showReactions])
+
+  const openPicker = () => {
+    if (triggerRef.current) {
+      const r = triggerRef.current.getBoundingClientRect()
+      setPickerRect({ top: r.top - 4, right: window.innerWidth - r.right })
+    }
+    setShowReactions(v => !v)
+  }
 
   return (
     <div
@@ -89,27 +135,223 @@ function BotCard({ bot, onAction, onDelete }: {
         className="flex flex-col gap-2 py-3"
         style={{ borderTop: `1px solid ${S.border}`, borderBottom: `1px solid ${S.border}` }}
       >
-        <div className="flex items-center justify-between">
-          <span className="flex items-center gap-1.5 text-[11px]" style={{ color: S.textMute }}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 text-[11px] shrink-0" style={{ color: S.textMute }}>
+            <KeyRound size={10} /> Token
+          </span>
+          {editingToken ? (
+            <form
+              className="flex items-center gap-1 flex-1 min-w-0"
+              onSubmit={async e => {
+                e.preventDefault()
+                if (!newToken.trim() || newToken.trim().length < 20) return
+                setSavingToken(true)
+                try { await onUpdate(bot.id, { telegramToken: newToken.trim() }) } finally {
+                  setSavingToken(false); setEditingToken(false); setNewToken('')
+                }
+              }}
+            >
+              <input
+                autoFocus
+                type="password"
+                value={newToken}
+                onChange={e => setNewToken(e.target.value)}
+                placeholder="Nouveau token…"
+                className="flex-1 min-w-0 outline-none rounded px-1.5 py-0.5 text-[11px] font-mono"
+                style={{ background: S.input, color: S.text, border: `1px solid ${S.accent}` }}
+              />
+              <button
+                type="submit"
+                disabled={savingToken || newToken.trim().length < 20}
+                style={{ color: S.green, background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+              >
+                {savingToken ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setEditingToken(false); setNewToken('') }}
+                style={{ color: S.red, background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+              >
+                <X size={11} />
+              </button>
+            </form>
+          ) : (
+            <span className="flex items-center gap-1 text-[11px] font-mono" style={{ color: S.textDim }}>
+              {'•'.repeat(12)}…
+              <button
+                onClick={() => setEditingToken(true)}
+                style={{ color: S.textFade, background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = S.accent }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = S.textFade }}
+              >
+                <Pencil size={9} />
+              </button>
+            </span>
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 text-[11px] shrink-0" style={{ color: S.textMute }}>
             <Hash size={10} />{t('bot_info_channel')}
           </span>
-          <span className="flex items-center gap-1 text-[11px] font-mono" style={{ color: S.textDim }}>
-            {bot.channelId}
-            <a
-              href={`https://t.me/${bot.channelId.replace('@','')}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: S.textFade }}
+          {editingCh ? (
+            <form
+              className="flex items-center gap-1 flex-1 min-w-0"
+              onSubmit={async e => {
+                e.preventDefault()
+                if (!newChannelId.trim()) return
+                setSavingCh(true)
+                try { await onUpdate(bot.id, { channelId: newChannelId.trim() }) } finally {
+                  setSavingCh(false); setEditingCh(false)
+                }
+              }}
             >
-              <ExternalLink size={9} />
-            </a>
-          </span>
+              <input
+                autoFocus
+                value={newChannelId}
+                onChange={e => setNewChannelId(e.target.value)}
+                className="flex-1 min-w-0 outline-none rounded px-1.5 py-0.5 text-[11px] font-mono"
+                style={{ background: S.input, color: S.text, border: `1px solid ${S.accent}` }}
+              />
+              <button
+                type="submit"
+                disabled={savingCh}
+                style={{ color: S.green, background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+              >
+                {savingCh ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setEditingCh(false); setNewChannelId(bot.channelId) }}
+                style={{ color: S.red, background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+              >
+                <X size={11} />
+              </button>
+            </form>
+          ) : (
+            <span className="flex items-center gap-1 text-[11px] font-mono" style={{ color: S.textDim }}>
+              {bot.channelId}
+              <a
+                href={`https://t.me/${bot.channelId.replace('@','')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: S.textFade }}
+              >
+                <ExternalLink size={9} />
+              </a>
+              <button
+                onClick={() => { setNewChannelId(bot.channelId); setEditingCh(true) }}
+                style={{ color: S.textFade, background: 'none', border: 'none', cursor: 'pointer', padding: 2 }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = S.accent }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = S.textFade }}
+              >
+                <Pencil size={9} />
+              </button>
+            </span>
+          )}
         </div>
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-[11px]" style={{ color: S.textMute }}>
             <Radio size={10} />{t('bot_info_broadcasts')}
           </span>
           <span className="text-[11px] tabular-nums" style={{ color: S.text }}>{bot.broadcastCount}</span>
+        </div>
+
+        {/* Reaction row */}
+        <div className="flex items-center justify-between" style={{ position: 'relative' }}>
+          <span className="flex items-center gap-1.5 text-[11px]" style={{ color: S.textMute }}>
+            <span style={{ fontSize: 11 }}>✨</span> Réaction auto
+          </span>
+
+          {/* Trigger button */}
+          <button
+            ref={triggerRef}
+            onClick={openPicker}
+            disabled={savingReact}
+            className="flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-all disabled:opacity-40"
+            style={{
+              background:     bot.reaction ? `${S.accent}15` : S.input,
+              color:          bot.reaction ? S.accent : S.textMute,
+              border:         `1px solid ${bot.reaction ? S.accent + '35' : S.border}`,
+              cursor:         'pointer',
+              minWidth:       54,
+              justifyContent: 'center',
+            }}
+          >
+            {savingReact
+              ? <Loader2 size={11} className="animate-spin" />
+              : bot.reaction
+                ? <span style={{ fontSize: 16, lineHeight: 1 }}>{bot.reaction}</span>
+                : <span style={{ fontSize: 10, letterSpacing: '0.02em' }}>OFF</span>}
+          </button>
+
+          {/* Picker portal — renders into document.body to escape any overflow:hidden */}
+          {showReactions && pickerRect && createPortal(
+            <div
+              ref={reactPickerRef}
+              style={{
+                position:  'fixed',
+                right:      pickerRect.right,
+                top:        pickerRect.top,
+                transform: 'translateY(-100%)',
+                zIndex:     9999,
+                background: '#1c1c1c',
+                border:     `1px solid ${S.borderHi}`,
+                borderRadius: 12,
+                boxShadow:  '0 12px 40px rgba(0,0,0,0.8)',
+                padding:    12,
+                width:      234,
+              }}
+            >
+              <p style={{ fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: S.textMute, marginBottom: 8 }}>
+                Réaction Telegram
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 3 }}>
+                {/* OFF cell */}
+                <button
+                  onClick={async () => {
+                    setShowReactions(false); setSavingReact(true)
+                    try { await onUpdate(bot.id, { reaction: null }) } finally { setSavingReact(false) }
+                  }}
+                  title="Désactiver"
+                  style={{
+                    height: 28, width: '100%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    borderRadius: 6, cursor: 'pointer', fontSize: 9, fontWeight: 700,
+                    background: !bot.reaction ? `${S.accent}22` : S.input,
+                    color:      !bot.reaction ?  S.accent        : S.textFade,
+                    border:     `1px solid ${!bot.reaction ? S.accent + '55' : S.border}`,
+                  }}
+                  onMouseEnter={e => { if (bot.reaction) (e.currentTarget as HTMLElement).style.background = S.hover }}
+                  onMouseLeave={e => { if (bot.reaction) (e.currentTarget as HTMLElement).style.background = S.input }}
+                >OFF</button>
+
+                {TG_REACTIONS.map(emoji => {
+                  const active = bot.reaction === emoji
+                  return (
+                    <button
+                      key={emoji}
+                      onClick={async () => {
+                        setShowReactions(false); setSavingReact(true)
+                        try { await onUpdate(bot.id, { reaction: emoji }) } finally { setSavingReact(false) }
+                      }}
+                      title={emoji}
+                      style={{
+                        height: 28, width: '100%',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        borderRadius: 6, cursor: 'pointer', fontSize: 17, lineHeight: 1,
+                        background: active ? `${S.accent}22` : 'transparent',
+                        border:     `1px solid ${active ? S.accent + '55' : 'transparent'}`,
+                        transition: 'background 0.1s',
+                      }}
+                      onMouseEnter={e => { if (!active) (e.currentTarget as HTMLElement).style.background = S.hover }}
+                      onMouseLeave={e => { if (!active) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+                    >{emoji}</button>
+                  )
+                })}
+              </div>
+            </div>,
+            document.body,
+          )}
         </div>
       </div>
 
@@ -276,7 +518,7 @@ function DeployModal({ wsId, onClose, onDeployed }: {
 
 /* ─── Channels Page ─── */
 export default function Channels() {
-  const [ws,      setWs]      = useState<Workspace | null>(null)
+  const { workspace: ws } = useWorkspaces()
   const [bots,    setBots]    = useState<BotType[]>([])
   const [loading, setLoading] = useState(true)
   const [modal,   setModal]   = useState(false)
@@ -293,15 +535,9 @@ export default function Channels() {
   }, [])
 
   useEffect(() => {
-    wsApi.list()
-      .then(d => {
-        const w = d.workspaces[0] ?? null
-        setWs(w)
-        if (w) fetchBots(w)
-        else setLoading(false)
-      })
-      .catch(() => setLoading(false))
-  }, [fetchBots])
+    if (!ws) return
+    fetchBots(ws)
+  }, [ws, fetchBots])
 
   const handleAction = async (botId: string, action: 'start' | 'stop' | 'restart') => {
     if (!ws) return
@@ -312,6 +548,12 @@ export default function Channels() {
   const handleDelete = async (botId: string) => {
     if (!ws || !confirm(t('confirm_delete_bot'))) return
     await botApi.delete(ws.id, botId).catch(() => {})
+    fetchBots(ws)
+  }
+
+  const handleUpdate = async (botId: string, data: { channelId?: string; reaction?: string | null; telegramToken?: string }) => {
+    if (!ws) return
+    await botApi.update(ws.id, botId, data)
     fetchBots(ws)
   }
 
@@ -368,6 +610,7 @@ export default function Channels() {
                 bot={bot}
                 onAction={handleAction}
                 onDelete={handleDelete}
+                onUpdate={handleUpdate}
               />
             ))}
 

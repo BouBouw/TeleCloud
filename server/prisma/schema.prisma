@@ -13,9 +13,10 @@ model User {
   email        String   @unique
   passwordHash String
   displayName  String
-  globalRole   String   @default("USER")  // ADMIN | MOD | USER
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  globalRole     String    @default("USER")  // ADMIN | MOD | USER
+  deactivatedAt DateTime?                   // set when account is deactivated
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   ownedWorkspaces   Workspace[]       @relation("WorkspaceOwner")
   memberships       WorkspaceMember[]
@@ -49,17 +50,36 @@ model Workspace {
   montageProjects MontageProject[]
   socialAccounts  SocialAccount[]
   socialPosts     SocialPost[]
+  conversionJobs  ConversionJob[]
 }
 
 // ─── Workspace Members ───────────────────────────────────────────────────────
 model WorkspaceMember {
-  id          String        @id @default(uuid())
+  id          String    @id @default(uuid())
   workspaceId String
-  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   userId      String
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role        String        @default("EDITOR")  // OWNER | MANAGER | EDITOR
-  joinedAt    DateTime      @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        String    @default("EDITOR")  // OWNER | EDITOR
+  // Category toggles
+  canLibrary  Boolean   @default(true)
+  canStudio   Boolean   @default(true)
+  canMontage  Boolean   @default(true)
+  canChannels Boolean   @default(false)
+  // Library sub-permissions
+  libRead     Boolean   @default(true)
+  libWrite    Boolean   @default(true)
+  libDelete   Boolean   @default(false)
+  libSend     Boolean   @default(true)
+  // Montage sub-permissions
+  montageView   Boolean @default(true)
+  montageEdit   Boolean @default(true)
+  montageDelete Boolean @default(false)
+  // Channel sub-permissions
+  chanView    Boolean   @default(false)
+  chanManage  Boolean   @default(false)
+  chanDelete  Boolean   @default(false)
+  joinedAt    DateTime  @default(now())
 
   @@unique([workspaceId, userId])
 }
@@ -112,6 +132,7 @@ model Bot {
   name          String
   telegramToken String
   channelId     String
+  reaction      String?   // Telegram reaction emoji sent after each broadcast (null = disabled)
   containerId   String?   // Docker container ID
   status        String    @default("stopped") // running | stopped | error | paused
   broadcastCount Int      @default(0)
@@ -237,4 +258,19 @@ model SocialPost {
   publishedUrl String?
   publishedAt  DateTime?
   createdAt    DateTime       @default(now())
+}
+
+// ─── Conversion Jobs ─────────────────────────────────────────────────
+model ConversionJob {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  inputName    String
+  inputFormat  String
+  outputFormat String
+  outputPath   String?
+  status       String    @default("processing") // processing | done | error
+  errorMsg     String?
+  fileSize     Int?
+  createdAt    DateTime  @default(now())
 }

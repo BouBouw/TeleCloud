@@ -10,7 +10,8 @@ import path from 'path'
 import fs from 'fs'
 import { TimelineEntry, VideoEffect, SubtitleSegment, SubtitleStyle } from './types'
 
-const FFMPEG = process.env.FFMPEG_PATH ?? 'ffmpeg'
+const FFMPEG  = process.env.FFMPEG_PATH  ?? 'ffmpeg'
+const FFPROBE = process.env.FFPROBE_PATH ?? 'ffprobe'
 
 // Per-style FFmpeg color grading filter
 const STYLE_COLOR_GRADE: Record<string, string> = {
@@ -54,38 +55,56 @@ export async function assembleVideo(opts: AssembleOptions): Promise<void> {
   const concatListPath = path.join(tmpDir, `concat_${stamp}.txt`)
   const segmentFiles: string[] = []
 
+  // 'fade' transitions need a true cross-dissolve (xfade filter between segments).
+  // Per-segment fade-in + fade-out creates a double "dip to black" at every cut.
+  const dominantTransition = timeline[0]?.transition ?? 'cut'
+  const useXfade = timeline.length > 1 && dominantTransition === 'fade'
+  const xfadeDur = FADE_DUR['fade']  // 0.2 s
+
   // ── Step 1: Encode individual clip segments ───────────────────────
   for (let i = 0; i < timeline.length; i++) {
     const entry   = timeline[i]
     const segPath = path.join(tmpDir, `seg_${i}_${stamp}.ts`)
-    const fadeDur = FADE_DUR[entry.transition ?? 'cut'] ?? 0
-    await encodeSegment(entry, segPath, outW, outH, fadeDur)
+    // When xfade handles transitions, encode segments clean (no per-segment fades).
+    const segFadeDur = useXfade ? 0 : (FADE_DUR[entry.transition ?? 'cut'] ?? 0)
+    await encodeSegment(entry, segPath, outW, outH, segFadeDur)
     segmentFiles.push(segPath)
     opts.onProgress?.(Math.round((i / timeline.length) * 60))
   }
 
-  // ── Step 2: Write concat list ─────────────────────────────────────
-  const concatContent = segmentFiles.map(f => `file '${f.replace(/\\/g, '/')}'`).join('\n')
-  fs.writeFileSync(concatListPath, concatContent, 'utf8')
-
-  // ── Step 3: Build post-process vf chain ──────────────────────────
+  // ── Step 2: Build post-process vf chain ──────────────────────────
   const vfFilters: string[] = []
-
   const colorGrade = style ? (STYLE_COLOR_GRADE[style] ?? null) : null
   if (colorGrade) vfFilters.push(colorGrade)
-
   if (subtitles && subtitles.length > 0) {
     const dtFilter = buildSubtitleDrawtext(subtitles, outH, subtitleStyle)
     if (dtFilter) vfFilters.push(dtFilter)
   }
 
-  // Use the actual encoded duration (min of outputDuration and clip.duration) to avoid
-  // the last-frame-freeze bug: if a clip is shorter than outputDuration, the video track
-  // ends early but -t totalDuration keeps the stream open, freezing the last frame.
-  const totalDuration = timeline.reduce((s, e) => s + Math.min(e.outputDuration, e.clip.duration), 0)
+  if (useXfade) {
+    // ── Xfade path: cross-dissolve between every adjacent pair of segments ──
+    // Each transition overlaps by xfadeDur → total output = Σ(outputDurations) − (N−1)×xfadeDur
+    await assembleWithXfade(
+      segmentFiles, timeline, xfadeDur,
+      audioPath, audioOffset ?? 0,
+      outputPath, vfFilters, opts.onProgress,
+    )
+    return
+  }
+
+  // ── Concat path (cut / dip_to_black transitions) ──────────────────────────
+  // Include explicit `duration` per segment so the concat demuxer doesn't rely
+  // on MPEG-TS container metadata (which is often imprecise for short segments).
+  // Without durations, FFmpeg mis-estimates total length and stops encoding early
+  // (e.g. timeline=60s but output=37s because TS headers summed to 37s).
+  const concatContent = segmentFiles.map((f, i) =>
+    `file '${f.replace(/\\/g, '/')}'\nduration ${timeline[i].outputDuration.toFixed(6)}`
+  ).join('\n')
+  fs.writeFileSync(concatListPath, concatContent, 'utf8')
+
+  const totalDuration = timeline.reduce((s, e) => s + e.outputDuration, 0)
   const vfArg = vfFilters.length > 0 ? ['-vf', vfFilters.join(',')] : []
 
-  // ── Step 4: Concat + audio mix + post-process ────────────────────
   // If the audio has an offset, use atrim to seek to the right position without stream issues
   const offset = audioOffset ?? 0
   const audioMapArgs = offset > 0
@@ -129,6 +148,125 @@ export async function assembleVideo(opts: AssembleOptions): Promise<void> {
   opts.onProgress?.(100)
 }
 
+/**
+ * Assemble segments with smooth cross-dissolve transitions using FFmpeg xfade.
+ * Loads every segment as a separate input (no concat demuxer) and chains
+ * xfade=dissolve between each adjacent pair — eliminating the double-dip-to-black
+ * artefact produced by per-segment fade-in/fade-out filters.
+ *
+ * Total output duration = Σ(outputDuration) − (N−1) × fadeDur
+ * (overlapping frames are the inherent cost of dissolve transitions).
+ */
+async function assembleWithXfade(
+  segs: string[],
+  tl: TimelineEntry[],
+  fadeDur: number,
+  audioPath: string,
+  audioOffset: number,
+  outputPath: string,
+  vfFilters: string[],
+  onProgress?: (pct: number) => void,
+): Promise<void> {
+  const N = segs.length
+  const audioIdx = N   // audio is the last FFmpeg input
+
+  // Build input list: one -i per segment + the audio file
+  const inputArgs = segs.flatMap(f => ['-i', f])
+  inputArgs.push('-i', audioPath)
+
+  // Probe ACTUAL segment durations — encoder rounding means real length ≠ outputDuration.
+  // Without this, cumulative offset drift causes xfade to overshoot the first-input end,
+  // which makes FFmpeg hold the last frame (the "stuck on one frame" bug).
+  const actualDurs = await Promise.all(segs.map(f => probeVideoDuration(f)))
+
+  // Chain xfade filters between every adjacent pair.
+  // Add a `fifo` buffer after every xfade to prevent pipeline stalls when
+  // 20-40 filters are chained — without it FFmpeg can deadlock waiting for
+  // the next filter's input while holding all upstream frames in memory.
+  const fParts: string[] = []
+  let cumulOffset = 0  // accumulated actual output time before this xfade
+
+  // Pre-normalize every segment input to identical fps + pixel format.
+  // This is MANDATORY for clean xfade dissolves: if two adjacent segments have
+  // different frame rates (e.g. 24fps TikTok vs 30fps YouTube) the blended
+  // frames are sampled at wrong PTS positions → heavy pixel/grain artifacts.
+  for (let i = 0; i < N; i++) {
+    fParts.push(`[${i}:v]fps=fps=30000/1001,format=yuv420p[nv${i}]`)
+  }
+
+  let prevLabel = '[nv0]'
+  for (let i = 1; i < N; i++) {
+    const d = Math.max(fadeDur * 2 + 0.05, actualDurs[i - 1])
+    const xOffset = Math.max(0.001, cumulOffset + d - fadeDur)
+    const nextLabel = i < N - 1 ? `[xf${i}]` : '[vbase]'
+    fParts.push(
+      `${prevLabel}[nv${i}]xfade=transition=dissolve:duration=${fadeDur.toFixed(3)}` +
+      `:offset=${xOffset.toFixed(4)}${nextLabel}`,
+    )
+    cumulOffset += d - fadeDur
+    prevLabel = nextLabel
+  }
+
+  // Apply color grade / subtitle overlays on top of the xfade chain
+  let finalVLabel: string
+  if (vfFilters.length > 0) {
+    finalVLabel = '[vout]'
+    fParts.push(`[vbase]${vfFilters.join(',')}[vout]`)
+  } else {
+    finalVLabel = '[vbase]'
+  }
+
+  // Audio: optionally trim from audioOffset
+  if (audioOffset > 0) {
+    fParts.push(
+      `[${audioIdx}:a]atrim=start=${audioOffset.toFixed(3)},asetpts=PTS-STARTPTS[aout]`,
+    )
+  }
+  const aMapArg = audioOffset > 0 ? '[aout]' : `${audioIdx}:a:0`
+
+  // With N-1 dissolves each of fadeDur seconds, the total output is shorter by (N-1)*fadeDur
+  const totalDuration = tl.reduce((s, e) => s + e.outputDuration, 0) - (N - 1) * fadeDur
+
+  await new Promise<void>((resolve, reject) => {
+    const args = [
+      ...inputArgs,
+      '-filter_complex', fParts.join(';'),
+      '-map', finalVLabel,
+      '-map', aMapArg,
+      '-t', String(totalDuration),
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-movflags', '+faststart',
+      '-y', outputPath,
+    ]
+    const proc = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    proc.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString()
+      const m = /time=([\d:]+)/.exec(d.toString())
+      if (m && onProgress) {
+        const t = parseTimecode(m[1])
+        onProgress(60 + Math.round((t / totalDuration) * 38))
+      }
+    })
+    proc.on('close', code => {
+      if (code === 0) resolve()
+      else {
+        // Skip lines that just echo the filter string; find the real diagnostic
+        const lines = stderr.split('\n')
+        const errLine = lines.find(l =>
+          /error|invalid|failed/i.test(l) && !l.includes('xfade=') && !l.includes('filter_complex')
+        ) ?? lines.find(l => /error|invalid|failed/i.test(l)) ?? stderr.slice(-400)
+        reject(new Error(`FFmpeg xfade failed (code ${code}): ${errLine}`))
+      }
+    })
+    proc.on('error', e => reject(new Error(`FFmpeg spawn error: ${e.message}`)))
+  })
+
+  for (const f of segs) fs.unlink(f, () => {})
+  onProgress?.(100)
+}
+
 async function encodeSegment(
   entry: TimelineEntry,
   outputPath: string,
@@ -139,6 +277,10 @@ async function encodeSegment(
   const { clip, outputDuration, effects, transition } = entry
   const effect  = effects[0]
   const clipDur = Math.min(outputDuration, clip.duration)
+  // Freeze the last frame if the clip is shorter than its output slot.
+  // This ensures every segment fills its exact allotted duration so the
+  // concat total matches targetDuration precisely (fixes "60s → ~52s" bug).
+  const padDur  = outputDuration - clipDur
 
   return new Promise<void>((resolve, reject) => {
     const vfParts: string[] = [
@@ -167,16 +309,19 @@ async function encodeSegment(
     const effectFilter = buildEffectFilter(effect, clipDur, outW, outH)
     if (effectFilter) vfParts.push(effectFilter)
 
-    // Fade-in / fade-out for soft transitions
-    if (fadeDur > 0 && clipDur > fadeDur * 2) {
-      if (transition === 'fade') {
-        vfParts.push(`fade=type=in:st=0:d=${fadeDur}`)
-        vfParts.push(`fade=type=out:st=${clipDur - fadeDur}:d=${fadeDur}`)
-      } else if (transition === 'dip_to_black') {
-        vfParts.push(`fade=type=in:st=0:d=${fadeDur}:color=black`)
-        vfParts.push(`fade=type=out:st=${clipDur - fadeDur}:d=${fadeDur}:color=black`)
-      }
+    // Freeze last frame first — tpad must come BEFORE fade so the fade-out
+    // is applied to the full outputDuration (not just the raw clipDur).
+    // Without this, tpad would extend a black last-frame, creating an extra
+    // dark gap between clips (bug: ~0.3s of unexpected black per cut).
+    if (padDur > 0.01) vfParts.push(`tpad=stop_mode=clone:stop_duration=${padDur.toFixed(3)}`)
+
+    // Dip-to-black: fade in from black at start, fade out to black at end of
+    // the FULL output slot (anchor to outputDuration, not clipDur).
+    if (fadeDur > 0 && transition === 'dip_to_black' && outputDuration > fadeDur * 2) {
+      vfParts.push(`fade=type=in:st=0:d=${fadeDur}:color=black`)
+      vfParts.push(`fade=type=out:st=${(outputDuration - fadeDur).toFixed(3)}:d=${fadeDur}:color=black`)
     }
+
     // Normalize pixel format — prevents concat failures when source videos
     // have yuv422p / yuva420p / other formats that libx264 cannot directly use.
     vfParts.push(`format=yuv420p`)
@@ -184,12 +329,15 @@ async function encodeSegment(
     const args = [
       '-i', clip.videoPath,
       '-vf', vfParts.join(','),
-      '-t', String(clipDur),
+      '-t', String(outputDuration),
       '-an',
       // Hard-enforce the output dimensions — catches any rounding edge case from
       // scale+crop producing 1919×1080 instead of 1920×1080 on odd-dimension sources.
       '-s', `${outW}x${outH}`,
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '25',
+      // Normalize frame rate — CRITICAL for xfade: different source fps (24/25/30)
+      // cause PTS mismatches that produce pixel artifacts during dissolve transitions.
+      '-r', '30',
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
       '-y', outputPath,
     ]
 
@@ -399,6 +547,46 @@ export function ratioToDimensions(ratio: string): [number, number] {
     case 'SQUARE':   return [1080, 1080]
     default:         return [1920, 1080]
   }
+}
+
+/**
+ * Return the actual duration (in seconds) of an encoded video segment by running
+ * ffprobe on it.  Used to correct xfade offsets after encodeSegment — the
+ * encoder may round up/down by 1-2 frames, and with 40 chained xfades that
+ * error accumulates enough to overshoot the first-input end and freeze output.
+ */
+function probeVideoDuration(filePath: string): Promise<number> {
+  return new Promise<number>((resolve) => {
+    const proc = spawn(FFPROBE, [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_streams', '-select_streams', 'v:0',
+      '-show_format',
+      filePath,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] })
+    let out = ''
+    proc.stdout.on('data', (d: Buffer) => { out += d.toString() })
+    proc.on('close', () => {
+      try {
+        const parsed = JSON.parse(out)
+        const stream = parsed.streams?.[0]
+        const fmt    = parsed.format
+        // 1. Stream duration (most reliable for MPEG-TS — format.duration is often 0)
+        let dur = parseFloat(stream?.duration ?? '0')
+        if (!isNaN(dur) && dur > 0.001) { resolve(dur); return }
+        // 2. Format duration
+        dur = parseFloat(fmt?.duration ?? '0')
+        if (!isNaN(dur) && dur > 0.001) { resolve(dur); return }
+        // 3. duration_ts × time_base (last resort for TS containers)
+        const durTs = parseInt(stream?.duration_ts ?? '0', 10)
+        const tbStr = (stream?.time_base ?? '1/90000') as string
+        const [tbNum, tbDen] = tbStr.split('/').map(Number)
+        if (durTs > 0 && tbNum > 0 && tbDen > 0) { resolve(durTs * tbNum / tbDen); return }
+        resolve(1.5)
+      } catch { resolve(1.5) }
+    })
+    proc.on('error', () => resolve(1.5))
+  })
 }
 
 function parseTimecode(tc: string): number {

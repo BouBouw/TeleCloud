@@ -16,6 +16,7 @@ export interface BotContainerConfig {
   channelId: string
   apiUrl: string
   workspaceId: string
+  reaction?: string | null
 }
 
 const IMAGE_NAME = process.env.BOT_IMAGE_NAME ?? 'vibot-bot:latest'
@@ -36,6 +37,7 @@ export async function spawnBotContainer(cfg: BotContainerConfig): Promise<string
       `BOT_ID=${cfg.botId}`,
       `WORKSPACE_ID=${cfg.workspaceId}`,
       `API_URL=${cfg.apiUrl}`,
+      ...(cfg.reaction ? [`REACTION=${cfg.reaction}`] : []),
     ],
     HostConfig: {
       RestartPolicy: { Name: 'unless-stopped' },

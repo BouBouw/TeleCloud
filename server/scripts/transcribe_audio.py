@@ -166,15 +166,20 @@ def isolate_vocals(audio_path: str):
 
 # ─── Word → line grouping ─────────────────────────────────────────────────────
 
-def group_into_lines(segments_iter, max_words=5, max_duration=3.5, min_pause=0.35):
+def group_into_lines(segments_iter, max_words=4, max_duration=2.5, min_pause=0.5):
     """
     Convert word-level Whisper segments into display-ready subtitle lines.
+    Parameters tuned for MUSIC LYRICS:
+      - min_pause=0.5s  : singers take short breaths; only split on real phrase gaps
+      - max_words=4     : short lines feel tighter and more sync'd to the beat
+      - max_duration=2.5: avoid long-running subtitles that drift from the sung phrase
+
     A new line starts when:
       - There is a pause > min_pause seconds between words
       - The current line already has >= max_words words
       - The current line duration would exceed max_duration seconds
 
-    Returns a list of {"start", "end", "text"} dicts with precise timings.
+    Returns a list of {"start", "end", "text"} dicts with word-precise timings.
     """
     lines = []
 
@@ -236,22 +241,24 @@ def group_into_lines(segments_iter, max_words=5, max_duration=3.5, min_pause=0.3
 def transcribe(audio_path: str):
     from faster_whisper import WhisperModel
 
-    # "small" is significantly better than "base" for lyrics
+    # "small" gives significantly better lyrics accuracy than "base" with acceptable CPU time.
+    # The server route caps at "medium" for RAM reasons; user can pass ?model=medium for best quality.
     model_size = os.environ.get("WHISPER_MODEL", "small")
     language   = os.environ.get("WHISPER_LANGUAGE") or None
     device     = "cpu"
     compute    = "int8"
 
-    # Language-specific primer to orient Whisper towards song lyrics
+    # Language-specific primer oriented towards RAP / autotune lyrics.
+    # A concrete stylistic hint dramatically improves Whisper accuracy on music.
     lang_hints = {
-        "fr": "Paroles de chanson en français :",
-        "en": "Song lyrics in English:",
-        "es": "Letra de la canción en español:",
-        "de": "Liedtext auf Deutsch:",
-        "pt": "Letra da música em português:",
-        "it": "Testo della canzone in italiano:",
+        "fr": "Paroles de rap ou de chanson en français, rythmées, avec autotune :",
+        "en": "Rap or song lyrics in English, rhythmic flow, autotune:",
+        "es": "Letra de rap o canción en español, flujo rítmico:",
+        "de": "Rap- oder Liedtext auf Deutsch, rhythmisch:",
+        "pt": "Letra de rap ou música em português, rítmica:",
+        "it": "Testo rap o canzone in italiano, ritmico:",
     }
-    initial_prompt = lang_hints.get(language or "", "Song lyrics:")
+    initial_prompt = lang_hints.get(language or "", "Rap or song lyrics:")
 
     clean_path, cleanup = isolate_vocals(audio_path)
     try:
@@ -265,12 +272,20 @@ def transcribe(audio_path: str):
             condition_on_previous_text=False,
             # Temperature fallback: greedy first, then sampling if quality is poor
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            # Stricter quality filters — reject hallucinated / repeated content
-            compression_ratio_threshold=1.8,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.4,
+            # --- Thresholds loosened for RAP / autotune vocals ---
+            # Rap has repetitive patterns → high compression ratio is NORMAL, not a hallucination signal
+            compression_ratio_threshold=2.4,   # was 1.8
+            # Autotuned vocals have lower log-probability; don't reject them
+            log_prob_threshold=-1.5,            # was -1.0
+            # Heavily processed vocals look like "no speech" to the VAD; raise threshold
+            no_speech_threshold=0.65,           # was 0.4
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+            vad_parameters={
+                # Shorter silence gap → fewer blank periods between rap phrases
+                "min_silence_duration_ms": 150,   # was 300
+                # Larger pad → captures leading/trailing syllables at phrase edges
+                "speech_pad_ms": 400,             # was 200
+            },
             # word_timestamps=True gives per-word timing for precise subtitle sync
             word_timestamps=True,
             initial_prompt=initial_prompt,
@@ -279,14 +294,16 @@ def transcribe(audio_path: str):
         # Collect all segments (iterator is consumed by group_into_lines)
         segments_list = list(segments_iter)
 
-        # Deduplicate repeated segment texts (hallucination artifact)
-        seen: set = set()
+        # Remove CONSECUTIVE duplicate segments only (Whisper hallucination = same phrase
+        # repeated back-to-back).  Do NOT remove non-consecutive repeats — chorus /
+        # hook lines are real lyrics that genuinely recur throughout the song.
         deduped = []
+        prev_norm = None
         for seg in segments_list:
             norm = (seg.text or "").strip().lower().strip(".,!?¿¡ ")
-            if norm and len(norm) >= 2 and norm not in seen:
-                seen.add(norm)
+            if norm and len(norm) >= 2 and norm != prev_norm:
                 deduped.append(seg)
+                prev_norm = norm
 
         # Group words into natural subtitle lines with precise timings
         segments = group_into_lines(deduped)
@@ -330,167 +347,4 @@ if __name__ == "__main__":
 
 
 # ─── Audio pre-processing ─────────────────────────────────────────────────────
-
-def _ffmpeg_vocal_enhance(audio_path: str, tmp_dir: str):
-    """
-    Use ffmpeg to pre-process audio for voice recognition:
-     - Mix stereo to mono  (centre-panned vocals preserved, wide instruments reduced)
-     - High-pass 80 Hz     (removes kick/bass)
-     - Low-pass  8 kHz     (removes hi-hats, cymbals, noise)
-     - Loudness normalize  (Whisper prefers consistent levels)
-     - Resample to 16 kHz  (Whisper's optimal rate — also reduces file size)
-    No extra Python packages needed beyond ffmpeg being on PATH.
-    """
-    out = os.path.join(tmp_dir, "enhanced.wav")
-    af = (
-        "pan=mono|c0=0.5*c0+0.5*c1,"
-        "highpass=f=80,"
-        "lowpass=f=8000,"
-        "loudnorm"
-    )
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", audio_path,
-         "-af", af, "-ar", "16000", "-ac", "1", out],
-        capture_output=True, timeout=120,
-    )
-    return out if result.returncode == 0 and os.path.isfile(out) else None
-
-
-def _try_demucs(audio_path: str, tmp_dir: str):
-    """Separate vocals with demucs (best quality). Install: pip install demucs"""
-    try:
-        import importlib
-        if importlib.util.find_spec("demucs") is None:
-            return None
-        base = os.path.splitext(os.path.basename(audio_path))[0]
-        result = subprocess.run(
-            [sys.executable, "-m", "demucs",
-             "--two-stems=vocals", "--device", "cpu", "-o", tmp_dir, audio_path],
-            capture_output=True, timeout=900,
-        )
-        if result.returncode != 0:
-            return None
-        for model_dir in ("htdemucs", "htdemucs_ft", "mdx_extra_q", "mdx_extra"):
-            for ext in ("wav", "mp3"):
-                cand = os.path.join(tmp_dir, model_dir, base, f"vocals.{ext}")
-                if os.path.isfile(cand):
-                    return cand
-    except Exception:
-        pass
-    return None
-
-
-def _try_noisereduce(audio_path: str, tmp_dir: str):
-    """Spectral noise reduction. Install: pip install noisereduce soundfile"""
-    try:
-        import noisereduce as nr
-        import soundfile as sf
-        import numpy as np  # noqa
-        data, rate = sf.read(audio_path, always_2d=False)
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        reduced = nr.reduce_noise(y=data, sr=rate, stationary=False, prop_decrease=0.75)
-        out = os.path.join(tmp_dir, "denoised.wav")
-        sf.write(out, reduced, rate)
-        return out
-    except (ImportError, Exception):
-        return None
-
-
-def isolate_vocals(audio_path: str):
-    """
-    Isolation cascade (best → lightest):
-      1. demucs       — full ML source separation (optional, best quality)
-      2. noisereduce  — spectral subtraction (optional, moderate)
-      3. ffmpeg       — frequency filter + normalize (always available)
-      4. original     — no processing
-    Returns (clean_path, cleanup_fn).
-    """
-    if os.environ.get("VOCAL_ISOLATION", "1") == "0":
-        return audio_path, lambda: None
-
-    tmp = tempfile.mkdtemp(prefix="vocals_iso_")
-    cleanup = lambda: shutil.rmtree(tmp, ignore_errors=True)
-
-    result = _try_demucs(audio_path, tmp)
-    if result:
-        return result, cleanup
-
-    result = _try_noisereduce(audio_path, tmp)
-    if result:
-        return result, cleanup
-
-    # Fallback: always-available ffmpeg filter chain
-    result = _ffmpeg_vocal_enhance(audio_path, tmp)
-    if result:
-        return result, cleanup
-
-    cleanup()
-    return audio_path, lambda: None
-
-
-# ─── Transcription ────────────────────────────────────────────────────────────
-
-def transcribe(audio_path: str):
-    from faster_whisper import WhisperModel
-
-    # "small" is significantly better than "base" for lyrics
-    model_size = os.environ.get("WHISPER_MODEL", "small")
-    language   = os.environ.get("WHISPER_LANGUAGE") or None
-    device     = "cpu"
-    compute    = "int8"
-
-    # Language-specific primer to orient Whisper towards song lyrics
-    lang_hints = {
-        "fr": "Paroles de chanson en français :",
-        "en": "Song lyrics in English:",
-        "es": "Letra de la canción en español:",
-        "de": "Liedtext auf Deutsch:",
-        "pt": "Letra da música em português:",
-        "it": "Testo della canzone in italiano:",
-    }
-    initial_prompt = lang_hints.get(language or "", "Song lyrics:")
-
-    clean_path, cleanup = isolate_vocals(audio_path)
-    try:
-        model = WhisperModel(model_size, device=device, compute_type=compute)
-        segments_iter, info = model.transcribe(
-            clean_path,
-            language=language,
-            beam_size=5,
-            best_of=5,
-            # KEY: prevents Whisper looping the same phrase endlessly on music
-            condition_on_previous_text=False,
-            # Temperature fallback: greedy first, then sampling if quality is poor
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            # Stricter quality filters — reject hallucinated / repeated content
-            compression_ratio_threshold=1.8,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.4,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
-            word_timestamps=False,
-            initial_prompt=initial_prompt,
-        )
-        segments = []
-        seen: set[str] = set()
-        for seg in segments_iter:
-            text = seg.text.strip()
-            if not text or len(text) < 2:
-                continue
-            # Deduplicate repeated segments (hallucination artifact)
-            norm = text.lower().strip(".,!?¿¡ ")
-            if norm in seen:
-                continue
-            seen.add(norm)
-            segments.append({
-                "start": round(seg.start, 2),
-                "end":   round(seg.end,   2),
-                "text":  text,
-            })
-    finally:
-        cleanup()
-
-    return segments, info.language
-
 

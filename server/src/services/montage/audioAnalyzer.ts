@@ -87,11 +87,15 @@ export function findBestAudioSegment(beatInfo: BeatInfo, targetDuration: number)
     if (score > bestScore) { bestScore = score; bestOffset = offset }
   }
 
-  // Snap to closest beat for a clean cut-in point
+  // Snap to closest beat for a clean cut-in point.
+  // Clamp to maxAllowedOffset so the snap never overshoots the valid window
+  // (audioOffset + targetDuration must remain ≤ audioDuration).
+  const maxAllowedOffset = duration - targetDuration
   const beatInterval = bpm > 0 ? 60 / bpm : 0.5
   const snapRadius   = beatInterval * 0.6
   const snapBeat     = beats.find(b => Math.abs(b - bestOffset) <= snapRadius)
-  return snapBeat !== undefined ? snapBeat : bestOffset
+  const raw = snapBeat !== undefined ? snapBeat : bestOffset
+  return Math.max(0, Math.min(raw, maxAllowedOffset))
 }
 
 // ── Private: audio duration via ffprobe ──────────────────────────────────────

@@ -4,6 +4,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { v4 as uuid } from 'uuid'
+import jwt from 'jsonwebtoken'
 import prisma from '../lib/prisma'
 import { authenticate } from '../middleware/auth'
 import { validate } from '../middleware/validate'
@@ -24,6 +25,33 @@ async function requireMember(wsId: string, userId: string) {
   const member = await prisma.workspaceMember.findFirst({ where: { workspaceId: wsId, userId } })
   if (!member) throw Object.assign(new Error('Not a member'), { status: 403 })
 }
+
+// ── GET /api/workspaces/:wsId/social/tiktok/auth ── generate TikTok OAuth URL ──
+router.get('/tiktok/auth', async (req, res) => {
+  try {
+    const wsId  = req.params.wsId
+    const userId = req.user!.userId
+    await requireMember(wsId, userId)
+    if (!process.env.TIKTOK_CLIENT_KEY) {
+      res.status(500).json({ error: 'TIKTOK_CLIENT_KEY non configuré' }); return
+    }
+    const state = jwt.sign(
+      { wsId, userId, nonce: Math.random().toString(36).slice(2) },
+      process.env.JWT_SECRET!,
+      { expiresIn: '10m' } as jwt.SignOptions,
+    )
+    const params = new URLSearchParams({
+      client_key:    process.env.TIKTOK_CLIENT_KEY,
+      scope:         'user.info.basic,video.upload,video.publish',
+      response_type: 'code',
+      redirect_uri:  process.env.TIKTOK_REDIRECT_URI ?? 'https://vibot.cloud/auth/redirect',
+      state,
+    })
+    res.json({ url: `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}` })
+  } catch (e: any) {
+    res.status(e.status ?? 500).json({ error: e.message })
+  }
+})
 
 // ── GET /api/workspaces/:wsId/social/accounts ── list connected accounts ──────
 router.get('/accounts', async (req, res) => {

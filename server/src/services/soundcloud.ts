@@ -28,11 +28,42 @@ interface SCTrackInfo {
 }
 
 /**
+ * Follow HTTP 301/302 redirects to resolve short URLs (e.g. on.soundcloud.com/...).
+ * Returns the final URL after all redirects.
+ */
+async function resolveRedirects(inputUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const follow = (u: string, hops = 0) => {
+      if (hops > 10) return reject(new Error('Too many redirects'))
+      const lib = u.startsWith('https') ? https : http
+      lib.get(u, { headers: { 'User-Agent': 'Mozilla/5.0' } }, res => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const next = res.headers.location.startsWith('http')
+            ? res.headers.location
+            : new URL(res.headers.location, u).href
+          res.resume()
+          follow(next, hops + 1)
+        } else {
+          res.resume()
+          resolve(u)
+        }
+      }).on('error', reject)
+    }
+    follow(inputUrl)
+  })
+}
+
+/**
  * Resolve SoundCloud metadata via the Widget API (returns stream URL + duration).
+ * Supports short URLs like https://on.soundcloud.com/...
  */
 export async function resolveSCMetadata(trackUrl: string): Promise<SCTrackInfo> {
   const SC_KEY = 'KKzJxmw11tYpCs6T24P4uUYhqmjalG6M'
-  const url = `https://api-widget.soundcloud.com/resolve?url=${encodeURIComponent(trackUrl)}&client_id=${SC_KEY}`
+  // Resolve on.soundcloud.com short links to full soundcloud.com URLs
+  const resolvedUrl = /on\.soundcloud\.com/i.test(trackUrl)
+    ? await resolveRedirects(trackUrl)
+    : trackUrl
+  const url = `https://api-widget.soundcloud.com/resolve?url=${encodeURIComponent(resolvedUrl)}&client_id=${SC_KEY}`
   const raw = await fetchJson<RawSCTrack>(url)
   return mapRaw(raw)
 }

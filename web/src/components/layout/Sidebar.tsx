@@ -1,12 +1,13 @@
 ﻿import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Music2, Radio, Sliders,
-  ChevronLeft, ChevronRight, Volume2, Film, Clapperboard, X,
+  ChevronLeft, ChevronRight, Volume2, Film, Clapperboard, X, Users, HardDrive, Check,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useAuth } from '../../hooks/useAuth'
 import { useI18n } from '../../i18n'
 import { useMobileSidebar } from './AppLayout'
+import { useWorkspaces } from '../../store/workspaceStore'
 
 const S = {
   panelAlt: '#161616', bg: '#0a0a0a', hover: '#1e1e1e',
@@ -21,14 +22,25 @@ const navItems = [
   { to: '/studio',    icon: Sliders,         key: 'nav_studio'    as const },
   { to: '/montage',   icon: Clapperboard,    key: 'nav_montage'   as const },
   { to: '/channels',  icon: Radio,           key: 'nav_channels'  as const },
+  { to: '/members',   icon: Users,           key: 'nav_members'   as const },
 ]
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
+  const [wsOpen, setWsOpen] = useState(false)
+  const wsRef = useRef<HTMLDivElement>(null)
   const location = useLocation()
   const { user } = useAuth()
   const { t } = useI18n()
   const { mobileOpen, closeMobile } = useMobileSidebar()
+  const { workspace, workspaces, setActiveWorkspace } = useWorkspaces()
+
+  // Close ws dropdown on outside click
+  useEffect(() => {
+    const h = (e: MouseEvent) => { if (wsRef.current && !wsRef.current.contains(e.target as Node)) setWsOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [])
 
   return (
     <aside
@@ -62,6 +74,77 @@ export default function Sidebar() {
           <span className="font-bold text-sm tracking-tight" style={{ color: S.text }}>
             Vi<span style={{ color: S.accent }}>bot</span>
           </span>
+        )}
+      </div>
+
+      {/* Workspace switcher */}
+      <div
+        ref={wsRef}
+        className="relative shrink-0 px-1.5 py-1.5"
+        style={{ borderBottom: `1px solid ${S.border}` }}
+      >
+        <button
+          onClick={() => setWsOpen(o => !o)}
+          className="w-full flex items-center rounded text-xs transition-colors"
+          style={{
+            gap: collapsed ? 0 : 8,
+            padding: collapsed ? '7px 14px' : '7px 8px',
+            background: wsOpen ? S.hover : 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            color: S.text,
+            justifyContent: collapsed ? 'center' : 'flex-start',
+          }}
+          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = S.hover }}
+          onMouseLeave={e => { if (!wsOpen) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+          title={collapsed ? (workspace?.name ?? '') : undefined}
+        >
+          <HardDrive size={13} style={{ color: S.accent, flexShrink: 0 }} />
+          {!collapsed && (
+            <>
+              <span className="flex-1 text-left truncate text-[11px] font-medium" style={{ color: S.text }}>
+                {workspace?.name ?? '…'}
+              </span>
+              <ChevronRight
+                size={11}
+                style={{
+                  color: S.textMute, flexShrink: 0,
+                  transform: wsOpen ? 'rotate(90deg)' : 'none',
+                  transition: 'transform .15s',
+                }}
+              />
+            </>
+          )}
+        </button>
+
+        {wsOpen && !collapsed && workspaces.length > 0 && (
+          <div
+            className="absolute left-1.5 right-1.5 z-50 rounded overflow-hidden"
+            style={{ top: '100%', marginTop: 2, background: '#111', border: `1px solid ${S.border}`, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
+          >
+            <div className="px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-widest" style={{ color: S.textFade, borderBottom: `1px solid ${S.border}` }}>
+              Workspace
+            </div>
+            {workspaces.map(w => (
+              <button
+                key={w.id}
+                onClick={() => { setActiveWorkspace(w.id); setWsOpen(false) }}
+                className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-[11px] transition-colors"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: w.id === workspace?.id ? S.text : S.textMute }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = S.hover }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+              >
+                <div
+                  className="shrink-0 flex items-center justify-center rounded text-[9px] font-bold"
+                  style={{ width: 18, height: 18, background: w.id === workspace?.id ? S.accent : S.border, color: w.id === workspace?.id ? '#000' : S.textMute }}
+                >
+                  {w.name[0]?.toUpperCase()}
+                </div>
+                <span className="flex-1 truncate">{w.name}</span>
+                {w.id === workspace?.id && <Check size={10} style={{ color: S.accent, flexShrink: 0 }} />}
+              </button>
+            ))}
+          </div>
         )}
       </div>
 

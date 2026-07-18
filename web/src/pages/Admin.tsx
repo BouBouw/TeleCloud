@@ -1,7 +1,7 @@
 ﻿import { useState, useEffect, useCallback } from 'react'
 import {
   Users, Shield, Server, Database,
-  Activity, Settings, Zap, ShieldCheck, Loader2, HardDrive,
+  Activity, Settings, Zap, ShieldCheck, Loader2, HardDrive, Cookie, Check, Trash2, ExternalLink,
 } from 'lucide-react'
 import { adminApi } from '../lib/api'
 import type { AdminStats, AdminUser } from '../lib/api'
@@ -56,6 +56,12 @@ export default function Admin() {
   const [loadingUsers, setLoadingUsers] = useState(true)
   const [roleLoading,  setRoleLoading]  = useState<string | null>(null)
 
+  // YouTube cookies state
+  const [ytCookies, setYtCookies] = useState<{ configured: boolean; lines: number; mtime?: string } | null>(null)
+  const [ytCookieText, setYtCookieText] = useState('')
+  const [ytSaving, setYtSaving] = useState(false)
+  const [ytMsg, setYtMsg] = useState('')
+
   const loadStats = useCallback(async () => {
     try { setStats(await adminApi.stats()) }
     catch { /* ignore */ }
@@ -71,6 +77,28 @@ export default function Admin() {
   }, [])
 
   useEffect(() => { loadStats(); loadUsers() }, [loadStats, loadUsers])
+
+  useEffect(() => {
+    adminApi.getYouTubeCookies().then(setYtCookies).catch(() => {})
+  }, [])
+
+  const handleSaveYtCookies = async () => {
+    if (!ytCookieText.trim()) return
+    setYtSaving(true); setYtMsg('')
+    try {
+      const r = await adminApi.saveYouTubeCookies(ytCookieText)
+      setYtCookies({ configured: true, lines: r.lines, mtime: new Date().toISOString() })
+      setYtCookieText('')
+      setYtMsg(`✓ ${r.lines} entrées sauvegardées — YouTube devrait maintenant fonctionner`)
+    } catch (e) { setYtMsg('Erreur: ' + String(e)) }
+    finally { setYtSaving(false) }
+  }
+
+  const handleDeleteYtCookies = async () => {
+    await adminApi.deleteYouTubeCookies()
+    setYtCookies({ configured: false, lines: 0 })
+    setYtMsg('')
+  }
 
   const handleRoleChange = async (userId: string, role: string) => {
     setRoleLoading(userId)
@@ -252,6 +280,83 @@ export default function Admin() {
                 <Activity size={18} style={{ color: S.textFade }} />
               </div>
               <p className="text-xs" style={{ color: S.textMute }}>{t('logs_empty')}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* YouTube Cookies */}
+        <div style={{ background: S.panel, border: `1px solid ${S.border}`, borderRadius: 8, overflow: 'hidden' }}>
+          <div className="flex items-center justify-between px-4"
+            style={{ height: 40, borderBottom: `1px solid ${S.border}`, background: S.panelAlt }}>
+            <span className="flex items-center gap-2 text-xs font-semibold" style={{ color: S.text }}>
+              <Cookie size={12} style={{ color: '#FF0000' }} />
+              Cookies YouTube (bypass bot check)
+            </span>
+            {ytCookies?.configured && (
+              <span className="flex items-center gap-1 text-[10px]" style={{ color: S.green }}>
+                <Check size={10} /> Configuré · {ytCookies.lines} entrées
+              </span>
+            )}
+          </div>
+          <div className="p-4 flex flex-col gap-3">
+            {/* Status */}
+            <div className="flex items-start gap-3 p-3 rounded text-[11px] leading-relaxed"
+              style={{ background: ytCookies?.configured ? '#4ade8010' : '#f0a83010', border: `1px solid ${ytCookies?.configured ? '#4ade8030' : '#f0a83030'}`, color: S.textDim }}>
+              {ytCookies?.configured ? (
+                <span>
+                  ✓ Cookies actifs ({ytCookies.lines} domaines) — mise à jour {ytCookies.mtime ? new Date(ytCookies.mtime).toLocaleDateString('fr') : ''}.<br />
+                  Les téléchargements YouTube contournent maintenant le bot-check. À renouveler si tu vois à nouveau l'erreur "Sign in to confirm".
+                </span>
+              ) : (
+                <span>
+                  ⚠ Aucun cookie configuré — YouTube bloque les téléchargements depuis cette IP de serveur.<br />
+                  Colle tes cookies YouTube ci-dessous pour bypasser la protection.
+                </span>
+              )}
+            </div>
+
+            {/* Instructions */}
+            <details className="text-[10px]" style={{ color: S.textMute }}>
+              <summary className="cursor-pointer hover:brightness-150 flex items-center gap-1">
+                <ExternalLink size={9} /> Comment exporter mes cookies YouTube ?
+              </summary>
+              <ol className="mt-2 ml-3 flex flex-col gap-1 list-decimal" style={{ color: S.textFade }}>
+                <li>Installe l'extension <strong style={{ color: S.textDim }}>"Get cookies.txt LOCALLY"</strong> sur Chrome/Firefox</li>
+                <li>Va sur <strong style={{ color: S.textDim }}>youtube.com</strong> en étant connecté à ton compte Google</li>
+                <li>Clique sur l'extension → <strong style={{ color: S.textDim }}>"Export As" → "Cookies.txt (Current Site)"</strong></li>
+                <li>Ouvre le fichier téléchargé, copie-colle tout le contenu ici</li>
+                <li>Clique Sauvegarder</li>
+              </ol>
+            </details>
+
+            {/* Paste area */}
+            <textarea
+              value={ytCookieText}
+              onChange={e => setYtCookieText(e.target.value)}
+              placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	1234567890	VISITOR_INFO1_LIVE	xxxx&#10;..."
+              rows={6}
+              className="w-full text-[9px] font-mono rounded px-2 py-2 resize-y outline-none"
+              style={{ background: '#080808', border: `1px solid ${S.border}`, color: '#888', lineHeight: 1.5 }}
+            />
+
+            {ytMsg && (
+              <p className="text-[10px]" style={{ color: ytMsg.startsWith('✓') ? S.green : S.red }}>{ytMsg}</p>
+            )}
+
+            <div className="flex gap-2">
+              <button onClick={handleSaveYtCookies} disabled={ytSaving || !ytCookieText.trim()}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-40"
+                style={{ background: '#FF0000', color: '#fff' }}>
+                {ytSaving ? <Loader2 size={11} className="animate-spin" /> : <Cookie size={11} />}
+                Sauvegarder les cookies
+              </button>
+              {ytCookies?.configured && (
+                <button onClick={handleDeleteYtCookies}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold"
+                  style={{ background: '#1a1a1a', border: `1px solid ${S.border}`, color: S.red }}>
+                  <Trash2 size={11} /> Supprimer
+                </button>
+              )}
             </div>
           </div>
         </div>
