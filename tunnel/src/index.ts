@@ -209,9 +209,12 @@ async function downloadLocally(job: TunnelJob): Promise<string> {
   // --remote-components ejs:github allows yt-dlp to download the solver script (cached after first run).
   const jsArgs = ['--js-runtimes', 'node', '--remote-components', 'ejs:github']
 
-  // YouTube DASH streams (137, 136, 399…) get 403 because CDN URLs are signed per-IP/session.
-  // The Android client returns direct progressive MP4 URLs (not DASH) that bypass this restriction.
-  const ytClientArgs = ['--extractor-args', 'youtube:player_client=android,web']
+  // 1080p on YouTube only exists as DASH (separate video 137 + audio 140). The Android
+  // client returns ONLY low-res progressive MP4 (≤360/720p) — that's why downloads were
+  // 360-480p. The `tv` (TVHTML5) and `web_safari` clients expose the full 1080p DASH ladder
+  // and, now that we solve the n-challenge (JS runtime above), their URLs are properly
+  // signed and don't 403. `android` is kept last as a progressive fallback.
+  const ytClientArgs = ['--extractor-args', 'youtube:player_client=tv,web_safari,android']
 
   const args: string[] = [...await cookieArgs(), '--no-playlist', ...jsArgs, ...ytClientArgs]
 
@@ -221,10 +224,12 @@ async function downloadLocally(job: TunnelJob): Promise<string> {
       '-o', `${prefix}.%(ext)s`,
     )
   } else {
-    // MP4 and MONTAGE: Android client provides direct progressive MP4 URLs,
-    // avoid DASH streams entirely to prevent 403 CDN errors.
+    // Prefer 1080p H.264 DASH (137+140), then any 1080p, then the best single ≤1080p
+    // progressive (720p over 360p), and only then any best. Sort by resolution so we
+    // never silently pick a low format when a higher one is available.
     args.push(
-      '-f', 'bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080]+bestaudio/best',
+      '-S', 'res:1080,vcodec:h264,acodec:aac',
+      '-f', 'bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
       '--merge-output-format', 'mp4',
       '-o', `${prefix}.%(ext)s`,
     )
