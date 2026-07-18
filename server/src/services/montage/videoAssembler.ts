@@ -58,15 +58,14 @@ export async function assembleVideo(opts: AssembleOptions): Promise<void> {
   // 'fade' transitions need a true cross-dissolve (xfade filter between segments).
   // Per-segment fade-in + fade-out creates a double "dip to black" at every cut.
   const dominantTransition = timeline[0]?.transition ?? 'cut'
-  const useXfade = timeline.length > 1 && dominantTransition === 'fade'
-  const xfadeDur = FADE_DUR['fade']  // 0.2 s
+  const wantXfade = timeline.length > 1 && dominantTransition === 'fade'
 
   // ── Step 1: Encode individual clip segments ───────────────────────
   for (let i = 0; i < timeline.length; i++) {
     const entry   = timeline[i]
     const segPath = path.join(tmpDir, `seg_${i}_${stamp}.ts`)
     // When xfade handles transitions, encode segments clean (no per-segment fades).
-    const segFadeDur = useXfade ? 0 : (FADE_DUR[entry.transition ?? 'cut'] ?? 0)
+    const segFadeDur = wantXfade ? 0 : (FADE_DUR[entry.transition ?? 'cut'] ?? 0)
     await encodeSegment(entry, segPath, outW, outH, segFadeDur)
     segmentFiles.push(segPath)
     opts.onProgress?.(Math.round((i / timeline.length) * 60))
@@ -81,15 +80,25 @@ export async function assembleVideo(opts: AssembleOptions): Promise<void> {
     if (dtFilter) vfFilters.push(dtFilter)
   }
 
-  if (useXfade) {
-    // ── Xfade path: cross-dissolve between every adjacent pair of segments ──
-    // Each transition overlaps by xfadeDur → total output = Σ(outputDurations) − (N−1)×xfadeDur
-    await assembleWithXfade(
-      segmentFiles, timeline, xfadeDur,
-      audioPath, audioOffset ?? 0,
-      outputPath, vfFilters, opts.onProgress,
-    )
-    return
+  if (wantXfade) {
+    // Probe the REAL encoded length of every segment (encoder rounding drifts a
+    // frame or two per clip). The dissolve duration is derived from the SHORTEST
+    // segment so no xfade window can ever exceed its input — this is what fixes
+    // both the frozen-frame artefacts and the "Failed to configure output pad"
+    // (code 234) crashes on fast, short-clip montages.
+    const actualDurs = await Promise.all(segmentFiles.map(f => probeVideoDuration(f)))
+    const minDur = Math.min(...actualDurs)
+    const xfadeDur = Math.min(FADE_DUR['fade'], (minDur - 0.06) / 2)
+
+    if (xfadeDur >= 0.05) {
+      await assembleWithXfade(
+        segmentFiles, actualDurs, xfadeDur,
+        audioPath, audioOffset ?? 0,
+        outputPath, vfFilters, opts.onProgress,
+      )
+      return
+    }
+    // Clips too short for a visible dissolve → fall through to clean hard-cut concat.
   }
 
   // ── Concat path (cut / dip_to_black transitions) ──────────────────────────
@@ -159,7 +168,7 @@ export async function assembleVideo(opts: AssembleOptions): Promise<void> {
  */
 async function assembleWithXfade(
   segs: string[],
-  tl: TimelineEntry[],
+  actualDurs: number[],
   fadeDur: number,
   audioPath: string,
   audioOffset: number,
@@ -174,36 +183,32 @@ async function assembleWithXfade(
   const inputArgs = segs.flatMap(f => ['-i', f])
   inputArgs.push('-i', audioPath)
 
-  // Probe ACTUAL segment durations — encoder rounding means real length ≠ outputDuration.
-  // Without this, cumulative offset drift causes xfade to overshoot the first-input end,
-  // which makes FFmpeg hold the last frame (the "stuck on one frame" bug).
-  const actualDurs = await Promise.all(segs.map(f => probeVideoDuration(f)))
-
-  // Chain xfade filters between every adjacent pair.
-  // Add a `fifo` buffer after every xfade to prevent pipeline stalls when
-  // 20-40 filters are chained — without it FFmpeg can deadlock waiting for
-  // the next filter's input while holding all upstream frames in memory.
   const fParts: string[] = []
-  let cumulOffset = 0  // accumulated actual output time before this xfade
 
-  // Pre-normalize every segment input to identical fps + pixel format.
-  // This is MANDATORY for clean xfade dissolves: if two adjacent segments have
-  // different frame rates (e.g. 24fps TikTok vs 30fps YouTube) the blended
-  // frames are sampled at wrong PTS positions → heavy pixel/grain artifacts.
+  // Pre-normalize every segment to identical format / SAR / fps / timebase.
+  // - fps=30 matches the segment encode (encodeSegment uses -r 30); resampling
+  //   to 30000/1001 on already-30fps clips duplicates frames and is what made
+  //   the dissolve look "pixelated/grainy".
+  // - settb=1/30 pins a common timebase so chained xfades never fail to
+  //   configure their output pad (the code-234 crash).
   for (let i = 0; i < N; i++) {
-    fParts.push(`[${i}:v]fps=fps=30000/1001,format=yuv420p[nv${i}]`)
+    fParts.push(`[${i}:v]format=yuv420p,setsar=1,fps=30,settb=1/30[nv${i}]`)
   }
 
+  // Chain xfade filters between every adjacent pair, using the REAL encoded
+  // durations for the offsets. `fadeDur` is already guaranteed (by the caller)
+  // to be ≤ (shortest segment − 0.06)/2, so every xfade window stays strictly
+  // inside its inputs — no offset overshoot, no frozen last frame.
+  let cumulOffset = 0  // running length of the composite before this xfade
   let prevLabel = '[nv0]'
   for (let i = 1; i < N; i++) {
-    const d = Math.max(fadeDur * 2 + 0.05, actualDurs[i - 1])
-    const xOffset = Math.max(0.001, cumulOffset + d - fadeDur)
+    const xOffset = Math.max(0.01, cumulOffset + actualDurs[i - 1] - fadeDur)
     const nextLabel = i < N - 1 ? `[xf${i}]` : '[vbase]'
     fParts.push(
       `${prevLabel}[nv${i}]xfade=transition=dissolve:duration=${fadeDur.toFixed(3)}` +
       `:offset=${xOffset.toFixed(4)}${nextLabel}`,
     )
-    cumulOffset += d - fadeDur
+    cumulOffset += actualDurs[i - 1] - fadeDur
     prevLabel = nextLabel
   }
 
@@ -224,8 +229,10 @@ async function assembleWithXfade(
   }
   const aMapArg = audioOffset > 0 ? '[aout]' : `${audioIdx}:a:0`
 
-  // With N-1 dissolves each of fadeDur seconds, the total output is shorter by (N-1)*fadeDur
-  const totalDuration = tl.reduce((s, e) => s + e.outputDuration, 0) - (N - 1) * fadeDur
+  // Total = sum of the REAL segment lengths minus the (N-1) overlapping dissolves.
+  // Using the same actualDurs the offsets are built from keeps -t exactly on the
+  // last frame instead of cutting mid-dissolve or freezing at the end.
+  const totalDuration = actualDurs.reduce((s, d) => s + d, 0) - (N - 1) * fadeDur
 
   await new Promise<void>((resolve, reject) => {
     const args = [

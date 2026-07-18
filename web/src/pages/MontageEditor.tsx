@@ -610,6 +610,7 @@ export default function MontageEditor() {
   const [localClipOrder, setLocalClipOrder] = useState<string[]>([])
   const waveformCanvasRef = useRef<HTMLCanvasElement>(null)
   const waveformDataRef = useRef<number[]>([])
+  const [waveformVersion, setWaveformVersion] = useState(0) // bumped when real waveform decodes → triggers redraw
   const [tlZoom, setTlZoom] = useState(1)
   const tlScrollRef = useRef<HTMLDivElement>(null)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
@@ -657,9 +658,28 @@ export default function MontageEditor() {
     if (!id) { setLoading(false); return }
     montageApi.get(workspace.id, id).then(({ project: p }) => {
       setProject(p); setSettingStyle(p.style); setSettingDuration(p.durationMode); setSettingRatio(p.ratio)
-      // Restore previously saved transcription so the user doesn't need to re-run Whisper
+      // Restore previously saved transcription + style so the user doesn't need to
+      // re-run Whisper. The backend stores { segments, style } (older data may be a
+      // bare array), so parse defensively — otherwise the whole object was fed in as
+      // "segments" and the lyrics silently vanished on reload.
       if (p.subtitleData) {
-        try { setTranscriptSegments(JSON.parse(p.subtitleData)) } catch { /* ignore corrupt data */ }
+        try {
+          const d = JSON.parse(p.subtitleData)
+          const segs = Array.isArray(d) ? d : d?.segments
+          if (Array.isArray(segs)) setTranscriptSegments(segs)
+          const st = Array.isArray(d) ? null : d?.style
+          if (st && typeof st === 'object') {
+            if (st.color) setSubtitleColor(st.color)
+            if (st.bgColor) setSubtitleBgColor(st.bgColor)
+            if (typeof st.bgOpacity === 'number') setSubtitleBgOpacity(st.bgOpacity)
+            if (st.position) setSubtitlePos(st.position)
+            if (typeof st.customX === 'number') setSubtitleCustomX(st.customX)
+            if (typeof st.customY === 'number') setSubtitleCustomY(st.customY)
+            if (typeof st.fontSize === 'number') setSubtitleFontSize(st.fontSize)
+            if (st.effect) setSubtitleEffect(st.effect)
+            if (st.effectColor) setSubtitleEffectColor(st.effectColor)
+          }
+        } catch { /* ignore corrupt data */ }
       }
       if (p.status === 'QUEUED' || p.status === 'PROCESSING') startPolling(workspace.id, id)
       if (p.sourceVideos.some(sv => !sv.localPath && !sv.source.startsWith('ERROR:'))) startDlPolling(workspace.id, id)
@@ -747,6 +767,7 @@ export default function MontageEditor() {
           bars.push(Math.max(1, Math.min(100, peak * 200)))
         }
         waveformDataRef.current = bars
+        setWaveformVersion(v => v + 1) // trigger a canvas redraw now that real data is in
       } catch { /* keep decorative fallback */ }
     })()
     return () => { cancelled = true }
@@ -809,7 +830,16 @@ export default function MontageEditor() {
       ctx.fillRect(playX - 0.5, 0, 1, h)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTime, vidDuration, waveformBars, tlZoom])
+  }, [currentTime, vidDuration, waveformBars, tlZoom, waveformVersion])
+
+  // Release the "seeking" latch even if the mouse is let go off the slider thumb
+  // (otherwise onTimeUpdate stays blocked and playback appears frozen).
+  useEffect(() => {
+    const clear = () => { isSeekingRef.current = false }
+    window.addEventListener('pointerup', clear)
+    window.addEventListener('mouseup', clear)
+    return () => { window.removeEventListener('pointerup', clear); window.removeEventListener('mouseup', clear) }
+  }, [])
 
   // ── Load scene frames when Library modal opens ───────────────────
   // Frames are cached per project — only re-fetched when project changes
@@ -1193,10 +1223,11 @@ export default function MontageEditor() {
 
       if (!selectedClipId || !workspace || !id) return
 
-      // ─ Delete / Backspace: remove selected clip ─────────────────
+      // ─ Delete / Backspace: remove selected source clip (with confirm) ─
       if ((e.key === 'Delete' || e.key === 'Backspace') && !ctrl) {
         e.preventDefault()
         const toRemove = selectedClipId
+        if (!window.confirm('Retirer cette vidéo source du projet ?')) return
         setSelectedClipId(null)
         setClipboardClipId(prev => prev === toRemove ? null : prev)
         montageApi.removeVideo(workspace.id, id, toRemove)
@@ -1474,7 +1505,13 @@ export default function MontageEditor() {
                       onPlay={() => setAudioPlaying(true)}
                       onPause={() => setAudioPlaying(false)}
                       onEnded={() => setAudioPlaying(false)}
-                      onTimeUpdate={() => setAudioTime(audioPlayerRef.current?.currentTime ?? 0)}
+                      onTimeUpdate={() => {
+                        const t = audioPlayerRef.current?.currentTime ?? 0
+                        setAudioTime(t)
+                        // Drive the shared timeline clock so the playhead + live lyric
+                        // overlay follow the music (real-time lyric-timing preview).
+                        setCurrentTime(t)
+                      }}
                       onLoadedMetadata={() => setAudioDurState(audioPlayerRef.current?.duration ?? 0)}
                     />
                     <input
@@ -1483,6 +1520,7 @@ export default function MontageEditor() {
                         const t = Number(e.target.value)
                         if (audioPlayerRef.current) audioPlayerRef.current.currentTime = t
                         setAudioTime(t)
+                        setCurrentTime(t)
                       }}
                       className="w-full cursor-pointer"
                       style={{ accentColor: S.accent, height: 3 }}
@@ -1911,7 +1949,9 @@ export default function MontageEditor() {
                       style={{ ...posStyle, padding: subtitlePos === 'CUSTOM' ? 0 : '0 6%', maxWidth: '88%', cursor: 'grab', position: 'absolute' }}
                       onMouseDown={e => {
                         e.stopPropagation()
-                        const px = 50
+                        // Base the drag on the CURRENT position, else a subtitle already
+                        // moved to a custom X snaps back toward centre on the first drag.
+                        const px = subtitlePos === 'CUSTOM' ? subtitleCustomX : 50
                         const py = subtitlePos === 'CUSTOM' ? subtitleCustomY : subtitlePos === 'TOP' ? 8 : subtitlePos === 'CENTER' ? 50 : 85
                         subtitleDragStateRef.current = { active: true, startX: e.clientX, startY: e.clientY, startPx: px, startPy: py }
                       }}
@@ -2113,7 +2153,7 @@ export default function MontageEditor() {
                     {project.audioPath && (
                       <div className="relative" style={{ height: 32, borderBottom: '1px solid #111', background: '#080808' }}>
                         <canvas ref={waveformCanvasRef} style={{ width: totalTlW, height: 32, display: 'block' }} />
-                        {vidDuration > 0 && (
+                        {timelineDuration > 0 && (
                           <div className="absolute top-0 bottom-0 w-px pointer-events-none"
                             style={{ left: currentTime * pxPerSec, background: 'rgba(255,255,255,0.8)', boxShadow: '0 0 3px rgba(255,255,255,0.5)' }} />
                         )}
@@ -2186,7 +2226,7 @@ export default function MontageEditor() {
                           )
                         })}
                         {/* Playhead overlay */}
-                        {vidDuration > 0 && (
+                        {timelineDuration > 0 && (
                           <div className="absolute top-0 bottom-0 w-px pointer-events-none z-10"
                             style={{ left: currentTime * pxPerSec, background: 'rgba(255,255,255,0.5)' }} />
                         )}
@@ -2341,7 +2381,7 @@ export default function MontageEditor() {
                       </button>
 
                       {/* Playhead */}
-                      {vidDuration > 0 && (
+                      {timelineDuration > 0 && (
                         <div className="absolute top-0 bottom-0 w-0.5 z-10 pointer-events-none"
                           style={{ left: currentTime * pxPerSec, background: 'white', boxShadow: '0 0 4px rgba(255,255,255,0.6)' }}>
                           {/* Playhead head */}
@@ -2534,7 +2574,19 @@ export default function MontageEditor() {
 
     {showLyricsModal && (
       <DraggableModal title="Paroles & Transcription" icon={<Type size={12} />}
-        onClose={() => setShowLyricsModal(false)} defaultPos={{ x: 640, y: 72 }} defaultSize={{ w: 420, h: 660 }}>
+        onClose={() => {
+          setShowLyricsModal(false)
+          // Persist lyric edits + style silently so manual changes survive reload
+          // (no re-render/burn here — that stays on "Appliquer & sauvegarder").
+          if (workspace && transcriptSegments && transcriptSegments.length > 0) {
+            const style = {
+              color: subtitleColor, bgColor: subtitleBgColor, bgOpacity: subtitleBgOpacity,
+              position: subtitlePos, customX: subtitleCustomX, customY: subtitleCustomY,
+              fontSize: subtitleFontSize, effect: subtitleEffect, effectColor: subtitleEffectColor,
+            }
+            montageApi.saveSubtitles(workspace.id, project.id, transcriptSegments, style).catch(() => {})
+          }
+        }} defaultPos={{ x: 640, y: 72 }} defaultSize={{ w: 420, h: 660 }}>
         {/* ── Tab bar ── */}
         <div className="-mx-3 -mt-3 flex sticky top-0 z-10 border-b mb-3 shrink-0" style={{ background: '#141414', borderColor: '#222' }}>
           {(['segments', 'style'] as const).map(t => (
@@ -2693,9 +2745,17 @@ export default function MontageEditor() {
               disabled={!pasteText.trim()}
               onClick={() => {
                 const lines = pasteText.trim().split('\n').map(l => l.trim()).filter(Boolean)
-                const duration = project.audioDuration ?? lines.length * 3
-                const segDur = duration / lines.length
-                const segs = lines.map((text, i) => ({ start: +(i * segDur).toFixed(2), end: +((i + 1) * segDur).toFixed(2), text }))
+                if (lines.length === 0) return
+                // Start after the last existing segment so appended lyrics don't
+                // overlap earlier ones; spread over the remaining audio time.
+                const startAt = transcriptSegments?.length ? transcriptSegments[transcriptSegments.length - 1].end : 0
+                const total = project.audioDuration ?? (startAt + lines.length * 3)
+                const segDur = Math.max(0.6, (total - startAt) / lines.length)
+                const segs = lines.map((text, i) => ({
+                  start: +(startAt + i * segDur).toFixed(2),
+                  end:   +(startAt + (i + 1) * segDur).toFixed(2),
+                  text,
+                }))
                 setTranscriptSegments(prev => prev ? [...prev, ...segs] : segs)
                 setPasteText('')
               }}
