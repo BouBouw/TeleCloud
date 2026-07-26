@@ -21,6 +21,25 @@ model User {
   ownedWorkspaces   Workspace[]       @relation("WorkspaceOwner")
   memberships       WorkspaceMember[]
   refreshTokens     RefreshToken[]
+  apiKeys           ApiKey[]
+}
+
+// ─── API Keys (library export API) ───────────────────────────────────────────
+model ApiKey {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String    @default("Cle d'export")
+  keyHash     String    @unique              // sha256(rawKey) — the raw key is never stored
+  prefix      String                         // visible head of the key, e.g. "vbk_1a2b3c4d"
+  workspaceId String?                        // null = every workspace the user belongs to
+  scopes      String    @default("library:read") // comma-separated
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
 }
 
 // ─── Refresh Tokens ──────────────────────────────────────────────────────────

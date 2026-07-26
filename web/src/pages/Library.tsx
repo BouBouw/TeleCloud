@@ -3,13 +3,14 @@ import {
   Search, Play, Pause,
   Download, Trash2, Music2, Plus,
   CloudDownload, Loader2, Pencil, X, Check, Upload, Send, ChevronDown,
-  RefreshCw, Bot as BotIcon, CheckCircle2, Wand2, ArrowDownToLine,
+  RefreshCw, Bot as BotIcon, CheckCircle2, Wand2, ArrowDownToLine, KeyRound,
 } from "lucide-react"
 import { trackApi, botApi } from "../lib/api"
 import type { Track, Bot, Workspace } from "../lib/api"
 import { useWorkspaces, workspaceActions } from '../store/workspaceStore'
 import ResourcesTab from "../components/ResourcesTab"
 import ConverterTab from "../components/ConverterTab"
+import ExportTab from "../components/ExportTab"
 import { playerActions, usePlayerStore } from "../store/playerStore"
 import { useI18n } from '../i18n'
 
@@ -772,7 +773,7 @@ export default function Library() {
   const [tracks,     setTracks]     = useState<Track[]>([])
   const [total,      setTotal]      = useState(0)
   const [loading,    setLoading]    = useState(false)
-  const [tab,        setTab]        = useState<"library" | "search" | "convert">("library")
+  const [tab,        setTab]        = useState<"library" | "search" | "convert" | "export">("library")
   const { workspace: ws, workspaces, loading: wsLoading } = useWorkspaces()
   const [editing,    setEditing]    = useState<Track | null>(null)
   const [sendTracks, setSendTracks] = useState<Track[] | null>(null)
@@ -852,7 +853,7 @@ export default function Library() {
   const fmt     = (sec?: number) => sec ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}` : "--:--"
   const fmtSize = (b?: number)   => b   ? `${(b / 1048576).toFixed(1)} MB` : "--"
 
-  const TabBtn = ({ id, label, icon }: { id: 'library' | 'search' | 'convert'; label: string; icon: React.ReactNode }) => (
+  const TabBtn = ({ id, label, icon }: { id: 'library' | 'search' | 'convert' | 'export'; label: string; icon: React.ReactNode }) => (
     <button
       onClick={() => setTab(id)}
       className="flex items-center gap-1.5 px-3 py-1.5 text-xs transition-colors"
@@ -873,6 +874,7 @@ export default function Library() {
           <TabBtn id="library" label={t('tab_library')} icon={<Music2 size={12} />} />
           <TabBtn id="search"  label={t('tab_resources')}   icon={<CloudDownload size={12} />} />
           <TabBtn id="convert" label="Convertir" icon={<Wand2 size={12} />} />
+          <TabBtn id="export"  label="Exporter"  icon={<KeyRound size={12} />} />
           {ws && (
             <span className="ml-auto text-[10px]" style={{ color: S.textMute }}>
               {ws.name} · <span style={{ color: S.textDim }}>{total}</span>
@@ -920,6 +922,10 @@ export default function Library() {
         ) : tab === "convert" ? (
           <div className="flex-1 overflow-hidden">
             <ConverterTab workspaceId={ws?.id ?? "demo"} />
+          </div>
+        ) : tab === "export" ? (
+          <div className="flex-1 overflow-auto">
+            <ExportTab workspaceId={ws?.id ?? ""} />
           </div>
         ) : (
           <>

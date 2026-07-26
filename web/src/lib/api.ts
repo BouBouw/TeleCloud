@@ -517,6 +517,67 @@ export const adminApi = {
   deleteYouTubeCookies: () => request<{ ok: boolean }>('/admin/youtube-cookies', { method: 'DELETE' }),
 }
 
+// ── API keys / library export ─────────────────────────────────────────────────
+export interface ApiKey {
+  id: string
+  name: string
+  prefix: string
+  workspaceId: string | null
+  scopes: string[]
+  lastUsedAt: string | null
+  expiresAt: string | null
+  createdAt: string
+}
+
+export interface ExportIdentity {
+  user: { id: string; email: string; displayName: string }
+  key: { name: string; scopes: string[]; workspaceId: string | null }
+  workspaces: { id: string; name: string; slug: string; trackCount: number }[]
+}
+
+export interface ExportOptions {
+  workspaceId?: string
+  q?: string
+  includeAudio?: boolean
+  includeCovers?: boolean
+  limit?: number
+}
+
+function exportParams(secret: string, opts: ExportOptions = {}): URLSearchParams {
+  const p = new URLSearchParams({ api_key: secret })
+  if (opts.workspaceId) p.set('workspaceId', opts.workspaceId)
+  if (opts.q) p.set('q', opts.q)
+  if (opts.limit) p.set('limit', String(opts.limit))
+  if (opts.includeAudio === false) p.set('includeAudio', '0')
+  if (opts.includeCovers === false) p.set('includeCovers', '0')
+  return p
+}
+
+export const apiKeyApi = {
+  list:   () => request<{ keys: ApiKey[] }>('/keys'),
+  create: (data: { name?: string; workspaceId?: string | null; expiresInDays?: number | null }) =>
+    request<{ key: ApiKey; secret: string }>('/keys', { method: 'POST', body: JSON.stringify(data) }),
+  delete: (id: string) => request(`/keys/${id}`, { method: 'DELETE' }),
+
+  /** Validates a raw key and reports what it can reach — bypasses the JWT helper on purpose. */
+  identity: async (secret: string): Promise<ExportIdentity> => {
+    const res = await fetch(`${BASE}/export/v1/me`, { headers: { 'X-API-Key': secret } })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }))
+      throw new Error(body.error ?? `HTTP ${res.status}`)
+    }
+    return res.json()
+  },
+
+  libraryUrl: (secret: string, format: 'json' | 'csv', opts: ExportOptions = {}) => {
+    const p = exportParams(secret, opts)
+    if (format === 'csv') p.set('format', 'csv')
+    return `${BASE}/export/v1/library?${p}`
+  },
+  zipUrl: (secret: string, opts: ExportOptions = {}) =>
+    `${BASE}/export/v1/library.zip?${exportParams(secret, opts)}`,
+}
+
 // ── Tunnel ────────────────────────────────────────────────────────────────────
 export interface TunnelJobStatus {
   id:           string
